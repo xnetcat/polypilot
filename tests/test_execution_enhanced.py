@@ -380,19 +380,41 @@ def test_market_is_closed_helper(env, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# 5. Invalid side rejected
+# 5. Side validation: blank rejected; multi-outcome labels accepted
 # --------------------------------------------------------------------------- #
-def test_invalid_side_rejected(env, monkeypatch):
+def test_blank_side_rejected(env, monkeypatch):
+    # Only a blank/whitespace (or non-string) side is rejected now. Multi-outcome
+    # markets buy a specific OUTCOME token whose label IS the side, so arbitrary
+    # non-YES/NO labels must be accepted (see test below).
     state, ex = env
     monkeypatch.setattr(ex.order_book, "fetch_order_book",
         lambda tid: {"best_ask": 0.50, "best_bid": 0.48})
     res = ex.place_order(mode="paper", market_id="m1", token_id="tok",
-        question="Q", category="weather", side="MAYBE", size_usd=20.0,
+        question="Q", category="sports", side="   ", size_usd=20.0,
         fair_prob=0.6, confidence=0.7, thesis="t")
     assert res["status"] == "rejected"
-    assert "yes" in res["reason"].lower() and "no" in res["reason"].lower()
+    assert "side" in res["reason"].lower()
     assert state.get_positions("paper") == []
     assert state.get_portfolio("paper")["cash"] == 100.0
+
+
+def test_multi_outcome_label_side_accepted(env, monkeypatch):
+    # A multi-outcome label (e.g. "Lakers") is a valid side: it buys that
+    # outcome's token. The label's original case is preserved (not upper-cased
+    # like YES/NO).
+    state, ex = env
+    monkeypatch.setattr(ex.order_book, "fetch_order_book",
+        lambda tid: {"best_ask": 0.50, "best_bid": 0.48})
+    res = ex.place_order(mode="paper", market_id="m1", token_id="tok_lakers",
+        question="NBA Champion?", category="sports", side="Lakers",
+        size_usd=20.0, fair_prob=0.6, confidence=0.7, thesis="t")
+    assert res["status"] == "filled"
+    assert res["side"] == "Lakers"  # case preserved for non-binary labels
+    assert res["shares"] == 40.0    # 20 / 0.50
+    open_pos = state.get_positions("paper", status="open")
+    assert len(open_pos) == 1
+    assert open_pos[0]["side"] == "Lakers"
+    assert state.get_portfolio("paper")["cash"] == 80.0
 
 
 def test_side_case_insensitive_accepted(env, monkeypatch):

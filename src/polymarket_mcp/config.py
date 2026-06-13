@@ -47,3 +47,10 @@ GAMMA_API: str = "https://gamma-api.polymarket.com"
 # --- Optional research API keys ---
 FRED_API_KEY: str = os.getenv("FRED_API_KEY", "")
 NEWSAPI_KEY: str = os.getenv("NEWSAPI_KEY", "")
+
+# --- Optional notifications (best-effort; all unset -> notifier is a no-op) ---
+# Generic webhook: a JSON {event, message, ...} is POSTed here.
+POLYPILOT_WEBHOOK_URL: str = os.getenv("POLYPILOT_WEBHOOK_URL", "")
+# Telegram bot: both the token AND chat id must be set to enable Telegram.
+POLYPILOT_TELEGRAM_BOT_TOKEN: str = os.getenv("POLYPILOT_TELEGRAM_BOT_TOKEN", "")
+POLYPILOT_TELEGRAM_CHAT_ID: str = os.getenv("POLYPILOT_TELEGRAM_CHAT_ID", "")

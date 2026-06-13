@@ -271,3 +271,109 @@ def test_resolved_price_closed_losing_token(env, monkeypatch):
             "tokens": [{"token_id": "tok", "price": 0.0},
                        {"token_id": "other", "price": 1.0}]}))
     assert ex._resolved_price("mkt", "tok") == 0.0
+
+
+# --------------------------------------------------------------------------- #
+# Notification hooks (best-effort; default = no-op, no network)
+# --------------------------------------------------------------------------- #
+def test_paper_fill_triggers_notify(env, monkeypatch):
+    # On a successful paper fill, place_order calls notifications.notify("fill",..).
+    state, ex = env
+    calls = []
+    monkeypatch.setattr(ex.notifications, "notify",
+        lambda event, message, **f: calls.append((event, message, f)) or {"sent": True})
+    monkeypatch.setattr(ex.order_book, "fetch_order_book",
+        lambda tid: {"best_ask": 0.50, "best_bid": 0.48})
+    res = ex.place_order(mode="paper", market_id="m1", token_id="tok",
+        question="Q", category="weather", side="YES", size_usd=20.0,
+        fair_prob=0.6, confidence=0.7, thesis="t")
+    assert res["status"] == "filled"
+    assert len(calls) == 1
+    event, message, fields = calls[0]
+    assert event == "fill"
+    assert "YES" in message and "0.5" in message
+    assert fields["side"] == "YES"
+
+
+def test_notify_is_noop_by_default(env, monkeypatch):
+    # With no channel configured, the real notifier no-ops: place_order must NOT
+    # make any network call. (notifications.httpx.post would raise if hit.)
+    state, ex = env
+    def _boom(*a, **k):
+        raise AssertionError("no network call should happen when unconfigured")
+    monkeypatch.setattr(ex.notifications.httpx, "post", _boom)
+    monkeypatch.setattr(ex.notifications.config, "POLYPILOT_WEBHOOK_URL", "")
+    monkeypatch.setattr(ex.notifications.config, "POLYPILOT_TELEGRAM_BOT_TOKEN", "")
+    monkeypatch.setattr(ex.notifications.config, "POLYPILOT_TELEGRAM_CHAT_ID", "")
+    monkeypatch.setattr(ex.order_book, "fetch_order_book",
+        lambda tid: {"best_ask": 0.50, "best_bid": 0.48})
+    res = ex.place_order(mode="paper", market_id="m1", token_id="tok",
+        question="Q", category="weather", side="YES", size_usd=20.0,
+        fair_prob=0.6, confidence=0.7, thesis="t")
+    assert res["status"] == "filled"  # fill succeeds, notify no-ops silently
+
+
+def test_live_fill_triggers_notify(env, monkeypatch):
+    state, ex = env
+    monkeypatch.setattr(ex.config, "MODE", "live")
+    monkeypatch.setattr(ex.config, "POLYMARKET_PRIVATE_KEY", "0xkey")
+    calls = []
+    monkeypatch.setattr(ex.notifications, "notify",
+        lambda event, message, **f: calls.append((event, message)) or {"sent": True})
+
+    class FakeClient:
+        def create_market_order(self, args): return {"order": "signed"}
+        def post_order(self, order, otype):
+            return {"status": "matched", "orderID": "OID1",
+                    "takingAmount": "40", "makingAmount": "20"}
+    monkeypatch.setattr(ex, "_get_clob_client", lambda: FakeClient())
+    monkeypatch.setattr(ex.order_book, "fetch_order_book",
+        lambda tid: {"best_ask": 0.50, "best_bid": 0.48})
+
+    res = ex.place_order(mode="live", market_id="m1", token_id="tok",
+        question="Q", category="weather", side="YES", size_usd=20.0,
+        fair_prob=0.6, confidence=0.7, thesis="t")
+    assert res["status"] == "filled"
+    assert [c[0] for c in calls] == ["fill"]
+
+
+def test_reconcile_breaker_trip_triggers_notify(env, monkeypatch):
+    # Settling a loss that trips the kill-switch fires a single "breaker" notify.
+    # KILL_SWITCH_TOTAL_USD is $40 in this fixture; book a $45 loss.
+    state, ex = env
+    calls = []
+    monkeypatch.setattr(ex.notifications, "notify",
+        lambda event, message, **f: calls.append((event, message)) or {"sent": True})
+    monkeypatch.setattr(ex.order_book, "fetch_order_book",
+        lambda tid: {"best_ask": 0.50, "best_bid": 0.48})
+    # Open a $90 position -> 180 shares @ 0.50; it resolves to 0 -> -$90 loss.
+    ex.place_order(mode="paper", market_id="m1", token_id="tok", question="Q",
+        category="weather", side="YES", size_usd=90.0, fair_prob=0.6,
+        confidence=0.7, thesis="t")
+    fill_calls = [c for c in calls if c[0] == "fill"]
+    assert len(fill_calls) == 1
+    calls.clear()
+    monkeypatch.setattr(ex, "_resolved_price", lambda market_id, token_id: 0.0)
+    summary = ex.reconcile_positions(mode="paper")
+    assert summary["settled"] == 1
+    breaker_calls = [c for c in calls if c[0] == "breaker"]
+    assert len(breaker_calls) == 1
+    assert "kill switch" in breaker_calls[0][1].lower()
+
+
+def test_reconcile_no_breaker_no_notify(env, monkeypatch):
+    # A winning settlement does NOT trip the breaker -> no "breaker" notify.
+    state, ex = env
+    calls = []
+    monkeypatch.setattr(ex.notifications, "notify",
+        lambda event, message, **f: calls.append((event, message)) or {"sent": True})
+    monkeypatch.setattr(ex.order_book, "fetch_order_book",
+        lambda tid: {"best_ask": 0.50, "best_bid": 0.48})
+    ex.place_order(mode="paper", market_id="m1", token_id="tok", question="Q",
+        category="weather", side="YES", size_usd=20.0, fair_prob=0.6,
+        confidence=0.7, thesis="t")
+    calls.clear()
+    monkeypatch.setattr(ex, "_resolved_price", lambda market_id, token_id: 1.0)
+    summary = ex.reconcile_positions(mode="paper")
+    assert summary["settled"] == 1
+    assert [c for c in calls if c[0] == "breaker"] == []

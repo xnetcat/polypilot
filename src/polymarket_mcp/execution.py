@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import httpx
 
-from . import config, order_book, risk, state
+from . import config, notifications, order_book, risk, state
 
 
 def place_order(*, mode: str | None = None, market_id: str, token_id: str,
@@ -12,19 +12,27 @@ def place_order(*, mode: str | None = None, market_id: str, token_id: str,
                 fair_prob: float | None = None, confidence: float | None = None,
                 thesis: str = "", limit_price: float | None = None,
                 order_type: str = "market") -> dict:
-    """Place a buy order for `side` ('YES'/'NO') on a market. Enforces the
-    kill-switch first. In paper mode, fills against the live order book (walking
-    the asks for slippage). In live mode, `order_type` selects "market" (FAK) or
-    "limit" (GTC at `limit_price`)."""
+    """Place a buy order for `side` on a market. `side` is the outcome to buy:
+    "YES"/"NO" for binary markets, or the outcome label (e.g. "Lakers") for a
+    multi-outcome market — each outcome is its own CLOB token, traded per
+    `token_id`. Enforces the kill-switch first. In paper mode, fills against the
+    live order book (walking the asks for slippage). In live mode, `order_type`
+    selects "market" (FAK) or "limit" (GTC at `limit_price`)."""
     mode = mode or config.MODE
     if size_usd <= 0:
         return {"status": "rejected", "reason": "size_usd must be positive"}
 
-    # Input validation: side must be a recognized outcome (case-insensitive).
-    if not isinstance(side, str) or side.strip().upper() not in {"YES", "NO"}:
+    # Input validation: `side` is the outcome to buy. Multi-outcome markets use
+    # the outcome label as the side (e.g. "Candidate A"), so we only reject a
+    # blank/non-string side. Normalize lightly: strip whitespace, and upper-case
+    # the binary YES/NO labels while preserving the original case of any other
+    # outcome label.
+    if not isinstance(side, str) or not side.strip():
         return {"status": "rejected",
-                "reason": f"side must be 'YES' or 'NO', got {side!r}"}
-    side = side.strip().upper()
+                "reason": f"side must be a non-empty outcome label, got {side!r}"}
+    side = side.strip()
+    if side.upper() in {"YES", "NO"}:
+        side = side.upper()
 
     order_type = (order_type or "market").strip().lower()
     if order_type not in {"market", "limit"}:
@@ -167,7 +175,23 @@ def _record_paper_fill(market_id, token_id, question, category, side, size_usd,
               "size_usd": size_usd}
     if partial:
         result["partial"] = True
+    _notify_fill("paper", question, side, fill_price, shares, size_usd)
     return result
+
+
+def _notify_fill(mode, question, side, fill_price, shares, size_usd) -> None:
+    """Best-effort fill notification. No-ops when no channel is configured (so
+    it adds zero network in tests) and never raises — a notify failure must not
+    affect order execution."""
+    try:
+        notifications.notify(
+            "fill",
+            f"{side} {question} @ {fill_price} "
+            f"({shares} sh, ${size_usd}, {mode})",
+            mode=mode, side=side, question=question, fill_price=fill_price,
+            shares=shares, size_usd=size_usd)
+    except Exception:
+        pass
 
 
 _clob_client = None
@@ -225,6 +249,7 @@ def _live_fill(market_id, token_id, question, category, side, size_usd,
         question=question, category=category, side=side, entry_price=fill_price,
         size_usd=making or amount, shares=shares, fair_prob=fair_prob,
         confidence=confidence, thesis=thesis)
+    _notify_fill("live", question, side, fill_price, shares, making or amount)
     return {"status": "filled", "mode": "live", "position_id": pos_id,
             "order_id": resp.get("orderID", ""), "side": side,
             "fill_price": fill_price, "shares": shares}
@@ -283,6 +308,7 @@ def _live_limit_fill(market_id, token_id, question, category, side, size_usd,
         question=question, category=category, side=side, entry_price=fill_price,
         size_usd=spend, shares=shares, fair_prob=fair_prob,
         confidence=confidence, thesis=thesis)
+    _notify_fill("live", question, side, fill_price, shares, spend)
     return {"status": "filled", "mode": "live", "position_id": pos_id,
             "order_id": resp.get("orderID", ""), "side": side,
             "fill_price": fill_price, "shares": shares, "order_type": "limit",
@@ -561,6 +587,16 @@ def reconcile_positions(mode: str | None = None) -> dict:
         details.append({"position_id": pos["id"], "question": pos["question"],
                         "result": "won" if price >= 1.0 else "lost",
                         "realized_pnl": r.get("realized_pnl")})
+    # Best-effort breaker alert: if settling losses just tripped the kill-switch,
+    # send a single "breaker" notify. No-ops when unconfigured; never raises.
+    if settled:
+        ok, reason = risk.check_kill_switch(mode)
+        if not ok:
+            try:
+                notifications.notify("breaker", f"Kill switch tripped: {reason}",
+                                     mode=mode, reason=reason)
+            except Exception:
+                pass
     return {"settled": settled, "details": details}
 
 
