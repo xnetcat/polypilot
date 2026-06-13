@@ -122,6 +122,88 @@ def fetch_active_markets(limit: int = 50) -> list[Market]:
     return markets
 
 
+def fetch_market(condition_id: str) -> Market | None:
+    """Fetch a single market directly by its condition id.
+
+    Uses the Gamma API ``condition_ids`` filter so the market is returned even
+    if it would be far down the volume-sorted active list. Builds the ``Market``
+    with the same normalization/fields/binary-token check as
+    ``fetch_active_markets``. Returns ``None`` on any error or empty result.
+    """
+    if not condition_id:
+        return None
+
+    try:
+        resp = httpx.get(
+            f"{config.GAMMA_API}/markets",
+            params={"condition_ids": condition_id},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        log.warning("[markets] Gamma API error fetching %s: %s", condition_id, e)
+        return None
+
+    items = data if isinstance(data, list) else data.get("data", [])
+
+    for m in items:
+        try:
+            # Gamma API uses outcomePrices as a JSON string
+            outcome_prices = m.get("outcomePrices", "")
+            yes_price = 0.5
+            no_price = 0.5
+            prices: list = []  # always bound, even if outcomePrices is malformed JSON
+
+            if outcome_prices:
+                try:
+                    prices = json.loads(outcome_prices) if isinstance(outcome_prices, str) else outcome_prices
+                    if len(prices) >= 2:
+                        yes_price = float(prices[0])
+                        no_price = float(prices[1])
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    pass
+
+            token_list = _normalize_tokens(
+                raw_tokens=m.get("tokens", []),
+                raw_outcomes=m.get("outcomes", []),
+                raw_clob_token_ids=m.get("clobTokenIds", []),
+                raw_prices=prices if outcome_prices else [],
+                yes_price=yes_price,
+                no_price=no_price,
+            )
+
+            vol = float(m.get("volume", m.get("volumeNum", 0)) or 0)
+            question = (m.get("question") or "").strip()
+            resolved_id = m.get("conditionId", m.get("condition_id", m.get("id", "")))
+
+            # Direct lookup: keep the structural checks (must be a usable binary
+            # market) but NOT the liquidity/resolution filters that
+            # fetch_active_markets uses to prune its volume-sorted scan — the
+            # caller asked for THIS market by id, so return it even if 0-volume
+            # or priced at an extreme.
+            if not question or not resolved_id:
+                continue
+            if not _has_binary_tokens(token_list):
+                continue
+
+            return Market(
+                condition_id=resolved_id,
+                question=question,
+                category=_infer_category(question, m.get("tags", None) or []),
+                yes_price=yes_price,
+                no_price=no_price,
+                volume=vol,
+                end_date=m.get("endDate", m.get("end_date_iso", "")),
+                active=m.get("active", True),
+                tokens=token_list,
+            )
+        except (KeyError, ValueError, TypeError):
+            continue
+
+    return None
+
+
 def _fetch_from_clob(limit: int) -> list[Market]:
     """Fallback: fetch from CLOB API directly."""
     markets = []
