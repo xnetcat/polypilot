@@ -23,6 +23,7 @@ def get_portfolio(mode: str | None = None) -> dict:
     conn = db.connect(mode)
     try:
         _ensure_portfolio(conn, mode)
+        _roll_day(conn)
         ps = conn.execute("SELECT * FROM portfolio_state WHERE id = 1").fetchone()
         open_rows = conn.execute(
             "SELECT COUNT(*) c, COALESCE(SUM(size_usd),0) exp "
@@ -49,6 +50,7 @@ def _roll_day(conn) -> None:
         conn.execute(
             "UPDATE portfolio_state SET day_date=?, day_realized_pnl=0 WHERE id=1",
             (today,))
+        conn.commit()
 
 
 def open_position(mode, *, market_id, token_id, question, category, side,

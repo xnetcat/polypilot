@@ -1,3 +1,4 @@
+import sqlite3
 import time
 import pytest
 
@@ -51,3 +52,15 @@ def test_record_and_find_similar_intelligence(st):
     similar = st.get_similar_markets("paper", "temp nyc", limit=5)
     assert len(similar) == 1
     assert similar[0]["decision"] == "buy_no"
+
+
+def test_cannot_open_two_positions_on_same_market(st):
+    st.open_position("paper", market_id="m1", token_id="t1",
+        question="Q", category="weather", side="YES",
+        entry_price=0.40, size_usd=20.0, shares=50.0,
+        fair_prob=0.6, confidence=0.7, thesis="first")
+    with pytest.raises(sqlite3.IntegrityError):
+        st.open_position("paper", market_id="m1", token_id="t2",
+            question="Q", category="weather", side="NO",
+            entry_price=0.55, size_usd=10.0, shares=20.0,
+            fair_prob=0.4, confidence=0.6, thesis="second")
