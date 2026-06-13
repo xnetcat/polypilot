@@ -1,0 +1,6 @@
+{
+  "name": "polypilot",
+  "version": "0.1.0",
+  "description": "Autonomous Polymarket trading — skill + MCP server.",
+  "author": { "name": "xnetcat" }
+}
