@@ -1,0 +1,348 @@
+"""Market discovery from Polymarket's Gamma/CLOB APIs."""
+from __future__ import annotations
+
+from dataclasses import dataclass
+import json
+import logging
+import re
+
+import httpx
+
+from . import config
+
+log = logging.getLogger(__name__)
+
+
+@dataclass
+class Market:
+    condition_id: str
+    question: str
+    category: str
+    yes_price: float
+    no_price: float
+    volume: float
+    end_date: str
+    active: bool
+    tokens: list[dict]
+
+    @property
+    def implied_probability(self) -> float:
+        return self.yes_price
+
+    def to_dict(self) -> dict:
+        return {
+            "market_id": self.condition_id,
+            "question": self.question,
+            "category": self.category,
+            "yes_price": self.yes_price,
+            "no_price": self.no_price,
+            "volume": self.volume,
+            "end_date": self.end_date,
+            "active": self.active,
+            "tokens": self.tokens,
+        }
+
+
+def fetch_active_markets(limit: int = 50) -> list[Market]:
+    """Fetch active, liquid markets from Polymarket's Gamma API."""
+    markets = []
+
+    try:
+        resp = httpx.get(
+            f"{config.GAMMA_API}/markets",
+            params={
+                "limit": limit,
+                "active": True,
+                "closed": False,
+                "order": "volume",
+                "ascending": False,
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        log.warning("[markets] Gamma API error: %s, falling back to CLOB...", e)
+        return _fetch_from_clob(limit)
+
+    items = data if isinstance(data, list) else data.get("data", [])
+
+    for m in items:
+        try:
+            # Gamma API uses outcomePrices as a JSON string
+            outcome_prices = m.get("outcomePrices", "")
+            yes_price = 0.5
+            no_price = 0.5
+
+            if outcome_prices:
+                try:
+                    prices = json.loads(outcome_prices) if isinstance(outcome_prices, str) else outcome_prices
+                    if len(prices) >= 2:
+                        yes_price = float(prices[0])
+                        no_price = float(prices[1])
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    pass
+
+            token_list = _normalize_tokens(
+                raw_tokens=m.get("tokens", []),
+                raw_outcomes=m.get("outcomes", []),
+                raw_clob_token_ids=m.get("clobTokenIds", []),
+                raw_prices=prices if outcome_prices else [],
+                yes_price=yes_price,
+                no_price=no_price,
+            )
+
+            vol = float(m.get("volume", m.get("volumeNum", 0)) or 0)
+            question = (m.get("question") or "").strip()
+            condition_id = m.get("conditionId", m.get("condition_id", m.get("id", "")))
+
+            # Skip resolved or low-info markets
+            if yes_price in (0.0, 1.0) or vol == 0 or not question or not condition_id:
+                continue
+            if not _has_binary_tokens(token_list):
+                continue
+
+            markets.append(Market(
+                condition_id=condition_id,
+                question=question,
+                category=_infer_category(question, m.get("tags", None) or []),
+                yes_price=yes_price,
+                no_price=no_price,
+                volume=vol,
+                end_date=m.get("endDate", m.get("end_date_iso", "")),
+                active=m.get("active", True),
+                tokens=token_list,
+            ))
+        except (KeyError, ValueError, TypeError):
+            continue
+
+    # Sort by volume descending
+    markets.sort(key=lambda x: x.volume, reverse=True)
+    return markets
+
+
+def _fetch_from_clob(limit: int) -> list[Market]:
+    """Fallback: fetch from CLOB API directly."""
+    markets = []
+    try:
+        resp = httpx.get(
+            f"{config.POLYMARKET_HOST}/markets",
+            params={"limit": limit, "active": True},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        log.warning("[markets] CLOB API error: %s", e)
+        return markets
+
+    items = data if isinstance(data, list) else data.get("data", data.get("markets", []))
+
+    for m in items:
+        try:
+            tokens = m.get("tokens", [])
+            yes_price = 0.5
+            no_price = 0.5
+            for t in tokens:
+                outcome = t.get("outcome", "").lower()
+                price = float(t.get("price", 0.5))
+                if outcome == "yes":
+                    yes_price = price
+                elif outcome == "no":
+                    no_price = price
+
+            token_list = _normalize_tokens(
+                raw_tokens=tokens,
+                raw_outcomes=m.get("outcomes", []),
+                raw_clob_token_ids=[],
+                raw_prices=[],
+                yes_price=yes_price,
+                no_price=no_price,
+            )
+            condition_id = m.get("condition_id", m.get("id", ""))
+            question = (m.get("question", "") or "").strip()
+            volume = float(m.get("volume", 0) or 0)
+            if not condition_id or not question or not _has_binary_tokens(token_list):
+                continue
+
+            markets.append(Market(
+                condition_id=condition_id,
+                question=question,
+                category=_infer_category(question, m.get("tags") or []),
+                yes_price=yes_price,
+                no_price=no_price,
+                volume=volume,
+                end_date=m.get("end_date_iso", m.get("end_date", "")),
+                active=m.get("active", True),
+                tokens=token_list,
+            ))
+        except (KeyError, TypeError, ValueError):
+            continue
+
+    markets.sort(key=lambda x: x.volume, reverse=True)
+    return markets
+
+
+def _parse_sequence(value) -> list:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return []
+        return parsed if isinstance(parsed, list) else []
+    return []
+
+
+def _default_price_for_outcome(outcome: str, index: int, yes_price: float, no_price: float) -> float:
+    normalized = outcome.upper()
+    if normalized == "YES":
+        return yes_price
+    if normalized == "NO":
+        return no_price
+    return yes_price if index == 0 else no_price if index == 1 else 0.0
+
+
+def _normalize_tokens(
+    *,
+    raw_tokens,
+    raw_outcomes,
+    raw_clob_token_ids,
+    raw_prices,
+    yes_price: float,
+    no_price: float,
+) -> list[dict]:
+    tokens = _parse_sequence(raw_tokens)
+    outcomes = [str(outcome).strip() for outcome in _parse_sequence(raw_outcomes) if str(outcome).strip()]
+    clob_token_ids = [str(token_id) for token_id in _parse_sequence(raw_clob_token_ids) if token_id]
+    price_values: list[float] = []
+    for raw_price in _parse_sequence(raw_prices):
+        try:
+            price_values.append(float(raw_price))
+        except (TypeError, ValueError):
+            price_values.append(0.0)
+    normalized: list[dict] = []
+
+    for index, token in enumerate(tokens):
+        if not isinstance(token, dict):
+            continue
+
+        outcome = str(
+            token.get("outcome")
+            or token.get("name")
+            or token.get("label")
+            or token.get("result")
+            or ""
+        ).strip()
+        if not outcome and index < 2:
+            outcome = "Yes" if index == 0 else "No"
+
+        token_id = (
+            token.get("token_id")
+            or token.get("tokenId")
+            or token.get("clobTokenId")
+            or token.get("id")
+        )
+        if not token_id and index < len(clob_token_ids):
+            token_id = clob_token_ids[index]
+        if not token_id or not outcome:
+            continue
+
+        try:
+            price = float(token.get("price"))
+        except (TypeError, ValueError):
+            if index < len(price_values):
+                price = price_values[index]
+            else:
+                price = _default_price_for_outcome(outcome, index, yes_price, no_price)
+
+        normalized.append(
+            {
+                "token_id": str(token_id),
+                "outcome": outcome,
+                "price": price,
+            }
+        )
+
+    if normalized:
+        return normalized
+
+    fallback_outcomes = outcomes or ["Yes", "No"]
+    for index, token_id in enumerate(clob_token_ids[: len(fallback_outcomes)]):
+        outcome = fallback_outcomes[index]
+        price = price_values[index] if index < len(price_values) else _default_price_for_outcome(outcome, index, yes_price, no_price)
+        normalized.append(
+            {
+                "token_id": token_id,
+                "outcome": outcome,
+                "price": price,
+            }
+        )
+    return normalized
+
+
+def _has_binary_tokens(tokens: list[dict]) -> bool:
+    outcomes = {str(token.get("outcome", "")).upper() for token in tokens}
+    return outcomes == {"YES", "NO"}
+
+
+def _contains_keyword(text: str, keyword: str) -> bool:
+    if re.fullmatch(r"[a-z0-9]+", keyword):
+        return re.search(rf"(?<![a-z0-9]){re.escape(keyword)}(?![a-z0-9])", text) is not None
+    return keyword in text
+
+
+def _contains_any_keyword(text: str, keywords: list[str]) -> bool:
+    return any(_contains_keyword(text, keyword) for keyword in keywords)
+
+
+def _infer_category(question: str, tags: list) -> str:
+    """Infer category from question text and tags."""
+    q = question.lower()
+    tag_str = " ".join(str(t).lower() for t in tags)
+    combined = f"{q} {tag_str}"
+
+    if _contains_any_keyword(combined, ["bitcoin", "btc", "ethereum", "eth", "solana", "sol", "crypto", "blockchain", "defi", "token"]):
+        return "crypto"
+    # Politics BEFORE weather — "ukraine" contains "rain" which would false-match weather
+    if _contains_any_keyword(combined, ["election", "president", "congress", "senate", "trump", "biden", "political",
+                                        "rutte", "white house", "putin", "zelensky", "diplomat", "prime minister",
+                                        "legislation", "executive order", "veto", "impeach", "governor",
+                                        "trump say", "will trump", "biden say", "will biden"]):
+        return "politics"
+    if _contains_any_keyword(combined, ["temperature", "weather", "°c", "°f", "highest temp", "lowest temp",
+                                        "rain forecast", "rainfall", "precipitation"]):
+        return "weather"
+    if _contains_any_keyword(combined, ["counter-strike", "valorant", "dota", "league of legends", "rocket league", "overwatch", "rainbow six", "honor of kings"]):
+        return "esports"
+    if _contains_any_keyword(combined, ["ufc", "nba", "nfl", "nhl", "mlb", "fight", "match", "game", "vs.", "o/u", "rounds",
+                                        "win the 2", "premier league", "la liga", "serie a", "bundesliga"]):
+        return "sports"
+    if _contains_any_keyword(combined, ["ai", "artificial intelligence", "openai", "chatgpt", "llm", "google ai", "anthropic"]):
+        return "ai"
+    if _contains_any_keyword(combined, ["spacex", "nasa", "climate", "research", "study", "discovery"]):
+        return "science"
+    if _contains_any_keyword(combined, ["tech", "apple", "google", "microsoft", "software", "startup"]):
+        return "technology"
+
+    q_lower = question.lower()
+    for keyword, cat in [
+        ("tariff", "finance"), ("gdp", "economy"), ("trade war", "finance"),
+        ("interest rate", "finance"), ("fed ", "finance"), ("federal reserve", "finance"),
+        ("inflation", "economy"), ("unemployment", "economy"),
+        ("oscar", "culture"), ("grammy", "culture"), ("emmy", "culture"),
+        ("sanction", "geopolitics"), ("nato", "geopolitics"), ("un ", "geopolitics"),
+    ]:
+        if keyword in q_lower:
+            return cat
+
+    return "other"
+
+
+def get_token_id(market: Market, side: str) -> str | None:
+    """Get the token ID for a given side (YES/NO)."""
+    for t in market.tokens:
+        if t.get("outcome", "").upper() == side.upper():
+            return t.get("token_id")
+    return None
