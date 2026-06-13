@@ -39,6 +39,16 @@ in-session loop** until the user stops you or the kill-switch trips.
    `get_order_book(token_id)` / `get_price_history(token_id)`. Write an explicit
    fair-probability estimate and a one-paragraph thesis. Consult the category
    playbook in `references/`.
+   - **Subagent accelerator (optional).** IF you can dispatch subagents (you have
+     the `Task` tool — e.g. Claude Code), fan out the `polypilot-researcher`
+     subagent IN PARALLEL over the top candidate markets, **capped at 3–5 per
+     cycle** to bound cost. Pass each one ONE market (question, id, category,
+     current YES price, token ids). Each returns a structured verdict
+     (`fair_prob`, `recommended_side`, `confidence`, `edge`, `thesis`,
+     `key_evidence`); rank the candidates by the returned `edge` and carry the
+     winners' theses forward. If you cannot dispatch subagents (e.g. Codex),
+     research inline with the same tools — the steps and the bar are identical.
+     Either way the verdict is advice: YOU still own the decision.
 5. **Evaluate edge** — optionally `compute_edge(fair_prob, side, yes_price)` and
    `suggest_size(...)`. YOU decide whether the edge clears your bar and how much
    to stake. There is no hardcoded threshold — use judgment, and be willing to
@@ -47,6 +57,15 @@ in-session loop** until the user stops you or the kill-switch trips.
    Pass the `token_id` whose `outcome` matches the side you're buying (from
    `get_market`'s `tokens` list) — settlement keys off that token. If it returns
    `rejected`, respect the reason.
+   - **Red-team gate (optional).** Before a sizeable trade — e.g. stake `> 5%` of
+     bankroll, or above a USD amount you set — dispatch the `polypilot-skeptic`
+     subagent (if you have `Task`) to attack the thesis. Pass the proposed
+     market, side, thesis, and `fair_prob`. It returns
+     `{survives, refutation, suggested_fair_prob, confidence}`: trade only if it
+     `survives`, downsize toward its `suggested_fair_prob` when warranted, and
+     skip if it refutes the thesis. Small trades may skip the skeptic to save
+     cost. Without subagents, briefly red-team it yourself (look for the
+     strongest disconfirming evidence) before committing.
 7. **Log the evaluation (every market, including skips)** — for EVERY market you
    formed a view on this cycle, call `record_evaluation(...)`: when you trade
    (`decision="buy_yes"` or `"buy_no"`) AND when you skip (`decision="skip"`).
@@ -66,6 +85,13 @@ in-session loop** until the user stops you or the kill-switch trips.
 - Size with conviction, not formula: a strong, well-evidenced edge warrants more
   than a marginal one. The kill-switch — not a per-trade cap — is your backstop.
 - Skipping is a valid, common outcome. Doing nothing beats a bad trade.
+- The `polypilot-researcher` and `polypilot-skeptic` subagents are **optional
+  accelerators**, not required steps. They parallelize research and add a
+  red-team check when you can dispatch them; when you can't, inline reasoning with
+  the same tools is fully equivalent. They change neither the rules nor the
+  outcome of who decides: the kill-switch, the paper/live mode, the exit doctrine,
+  and "never invent data" all still apply, and the trade decision is always
+  yours.
 
 ## Tool reference (what each tool is for)
 - **Safety & pacing**: `get_risk_status`, `wait_for_next_cycle`.
@@ -78,3 +104,15 @@ in-session loop** until the user stops you or the kill-switch trips.
   `get_economic_data`, `get_news`.
 - **Analytics (advisory)**: `compute_edge`, `suggest_size`.
 - **Execution**: `place_order`, `close_position`.
+
+## Subagents (optional, when available)
+Auto-discovered from the plugin's `agents/` directory; usable only by clients
+with subagent dispatch (the `Task` tool, e.g. Claude Code). Both are research-only
+— neither can place or close orders.
+- **`polypilot-researcher`** — give it ONE market; it gathers data with the
+  research/market/order-book tools and returns a structured verdict
+  (`fair_prob`, `recommended_side`, `confidence`, `edge`, `thesis`,
+  `key_evidence`). Fan out in parallel over the top 3–5 candidates in step 4.
+- **`polypilot-skeptic`** — give it a proposed trade; it tries to refute the
+  thesis and returns `{survives, refutation, suggested_fair_prob, confidence}`.
+  Use it as the step-6 red-team gate before sizeable trades.

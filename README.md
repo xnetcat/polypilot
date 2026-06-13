@@ -42,6 +42,30 @@ Two halves ship in one plugin:
   trades, market intelligence, portfolio) with separate database files for paper
   and live. The kill-switch lives here.
 
+## Multi-agent mode
+
+On clients that support subagent dispatch (Claude Code's `Task` tool), Polypilot
+parallelizes its research and adds an adversarial check, using two subagents
+bundled in the plugin's `agents/` directory and auto-discovered on install. Both
+are **research-only** — neither can place or close orders; execution stays with
+the orchestrator and the kill-switch.
+
+- **`polypilot-researcher`** — handed one market, it gathers data with the
+  research, market, and order-book tools and returns a structured verdict
+  (fair probability, recommended side, confidence, edge, thesis, key evidence).
+  Each cycle the orchestrator fans these out **in parallel** over the top few
+  candidates (capped per cycle to bound cost) and ranks them by the returned
+  edge.
+- **`polypilot-skeptic`** — before a sizeable trade, it red-teams the proposed
+  thesis: it hunts for disconfirming data, checks the order book for adverse
+  flow, and re-tests the edge, then reports whether the trade survives (with a
+  more conservative fair-probability estimate). The trade goes through only if it
+  survives; small trades can skip this step to save cost.
+
+This is an **optional accelerator**. On clients without subagents (e.g. Codex),
+the agent does the same research and red-teaming inline with the same MCP tools —
+the loop, the rules, and the decisions are identical.
+
 ## Install as a Claude Code plugin
 
 Install the plugin (skill + bundled MCP server). The plugin's `.mcp.json`
@@ -87,7 +111,7 @@ A single cumulative-loss circuit breaker is the one rule enforced in code:
 Everything else — strategy, edge bar, position sizing, concentration, and
 timing — is the agent's judgment, not hardcoded.
 
-## Tool surface (22 tools)
+## Tool surface (28 tools)
 
 Grouped by purpose. The agent calls what it needs; all tools return plain JSON.
 
@@ -109,14 +133,21 @@ Grouped by purpose. The agent calls what it needs; all tools return plain JSON.
 - `suggest_size` — advisory half-Kelly stake suggestion.
 
 **Execution**
-- `place_order` — buy a side for a USD amount, storing your thesis/confidence/fair_prob; **enforces the kill-switch** and refuses when tripped or cash is short.
+- `place_order` — buy a side for a USD amount, storing your thesis/confidence/fair_prob; **enforces the kill-switch** and refuses when tripped or cash is short. Supports `order_type` `market` (default; slippage-walked in paper, FAK in live) or `limit` (GTC resting order at `limit_price`).
 - `reconcile_positions` — settle open positions whose markets resolved, crediting payouts and updating realized PnL.
 - `close_position` — sell an open position now at best bid (to recycle capital from near-resolved positions, not as a stop-loss).
 
+**Live trading ops** (read-only checks — no order is placed)
+- `get_live_balance` — on-chain USDC (collateral) balance from the CLOB.
+- `sync_live_positions` — diff on-chain positions vs. the local ledger (`on_chain_only` / `local_only` / `matched` / `in_sync`) without mutating state.
+- `preflight_live` — pre-flight checklist before going live: key set, derivable CLOB creds, positive balance, kill-switch configured. Returns `{ok, checks}`; never raises.
+
 **Portfolio / Memory**
-- `get_portfolio` — cash, realized/unrealized PnL, open count, exposure, mode.
+- `get_portfolio` — cash, realized PnL, open count, exposure, mode; best-effort marks open positions to market (book midpoints) to add `unrealized_pnl`, `mark_to_market_value`, and `total_pnl`.
 - `get_positions` — open (or closed) positions with entry, size, shares, and stored thesis.
 - `get_trade_history` — recent buy/sell trades with prices and outcomes.
+- `get_performance_stats` — win rate, total/avg PnL, and ROI from resolved evaluations, broken down by category (optional `category` filter).
+- `get_session_report` — one-shot snapshot: portfolio, risk status, performance stats, recent trades, and open-position count.
 - `record_thesis` — attach/refresh a written thesis, confidence, and fair probability on an open position.
 - `get_similar_markets` — your historical track record on past markets matching keywords (powers candidate screening).
 
