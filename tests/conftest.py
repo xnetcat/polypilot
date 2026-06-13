@@ -1,15 +1,21 @@
-"""Test-suite baseline: always run in paper mode.
+"""Test-suite baseline: a clean, hermetic environment.
 
-This dev machine may export POLYPILOT_MODE=live (for real trading), which would
-otherwise leak into the test process and break tests that rely on the default
-mode. Pin paper here before any config import; live-path tests override per-test
-via monkeypatch.
+This dev machine exports real Polypilot config for live trading (mode=live,
+wallet key, Brazil proxy, Discord webhook, FRED key, ...). None of that must
+leak into the test process — it would break "unconfigured" assertions and, worse,
+make tests issue real network calls (to Polymarket / Discord / Telegram).
+
+So before any config import we wipe ALL ambient POLYPILOT_*/POLYMARKET_* vars
+plus the standard proxy and research-key vars, then pin paper mode. Tests that
+exercise a specific config set it themselves via monkeypatch + importlib.reload.
 """
 import os
 
-os.environ["POLYPILOT_MODE"] = "paper"
-# Never let an ambient proxy (this dev machine may export POLYPILOT_HTTP_PROXY
-# for live trading) activate during tests — config would otherwise export
-# HTTPS_PROXY and route mocked requests oddly. Keep the suite fully hermetic.
-for _v in ("POLYPILOT_HTTP_PROXY", "HTTP_PROXY", "HTTPS_PROXY"):
+for _k in list(os.environ):
+    if _k.startswith("POLYPILOT_") or _k.startswith("POLYMARKET_"):
+        os.environ.pop(_k, None)
+
+for _v in ("HTTP_PROXY", "HTTPS_PROXY", "FRED_API_KEY", "NEWSAPI_KEY"):
     os.environ.pop(_v, None)
+
+os.environ["POLYPILOT_MODE"] = "paper"
