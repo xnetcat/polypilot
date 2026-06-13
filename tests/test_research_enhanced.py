@@ -298,10 +298,11 @@ def test_extract_teams_strips_trailing_tonight():
         "Will the Lakers beat the Celtics tonight?")
     assert teams is not None
     team1, team2 = teams
-    # Trailing "tonight" is stripped (the prior behavior leaked it into team2).
+    # Trailing "tonight" is stripped (the prior behavior leaked it into team2),
+    # and the leading article is stripped too.
     assert "tonight" not in team2.lower()
-    assert team2 == "the Celtics"
-    assert team1 == "the Lakers"
+    assert team2 == "Celtics"
+    assert team1 == "Lakers"
 
 
 def test_extract_teams_clean_vs_unchanged():
