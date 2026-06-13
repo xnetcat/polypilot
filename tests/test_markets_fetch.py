@@ -116,7 +116,8 @@ def test_fetch_market_empty_condition_id_returns_none():
     assert markets.fetch_market("") is None
 
 
-def test_fetch_market_non_binary_returns_none(monkeypatch):
+def test_fetch_market_non_binary_returns_multi_outcome(monkeypatch):
+    """Direct lookup of a non-binary market now returns it as multi-outcome."""
     non_binary = {
         "question": "Who will be the next president?",
         "conditionId": "0xmulti",
@@ -129,4 +130,8 @@ def test_fetch_market_non_binary_returns_none(monkeypatch):
         "tags": ["politics"],
     }
     monkeypatch.setattr(markets.httpx, "get", lambda *a, **k: _make_resp([non_binary]))
-    assert markets.fetch_market("0xmulti") is None
+    m = markets.fetch_market("0xmulti")
+    assert m is not None
+    assert m.is_binary is False
+    assert m.condition_id == "0xmulti"
+    assert {t["outcome"] for t in m.tokens} == {"Trump", "Biden"}

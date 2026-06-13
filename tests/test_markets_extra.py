@@ -144,8 +144,13 @@ def test_has_binary_tokens_false_for_non_binary():
     assert markets._has_binary_tokens(non_binary) is False
 
 
-def test_non_binary_market_is_skipped_by_fetch(monkeypatch):
-    """A market whose outcomes are not YES/NO is dropped by fetch_active_markets."""
+def test_non_binary_market_is_included_by_fetch(monkeypatch):
+    """A market whose outcomes are not YES/NO is now surfaced as multi-outcome.
+
+    Multi-outcome markets (>=2 usable tokens) pass discovery; the strict YES/NO
+    gate was removed. The Market is flagged ``is_binary=False`` and exposes all
+    candidate tokens.
+    """
     non_binary_row = {
         "question": "Who will be the next president?",
         "conditionId": "0xmulti",
@@ -159,7 +164,11 @@ def test_non_binary_market_is_skipped_by_fetch(monkeypatch):
     }
     monkeypatch.setattr(markets.httpx, "get", lambda *a, **k: _make_resp([non_binary_row]))
     result = markets.fetch_active_markets(limit=10)
-    assert result == []
+    assert len(result) == 1
+    m = result[0]
+    assert m.condition_id == "0xmulti"
+    assert m.is_binary is False
+    assert {t["outcome"] for t in m.tokens} == {"Trump", "Biden"}
 
 
 # ---------------------------------------------------------------------------
@@ -178,8 +187,16 @@ def test_to_dict_documented_keys_and_json_serializable():
         "end_date",
         "active",
         "tokens",
+        "is_binary",
+        "outcomes",
     }
     assert set(d.keys()) == expected_keys
     assert d["market_id"] == "0xabc"
+    assert d["is_binary"] is True
+    # outcomes mirror every token (label/token_id/price)
+    assert d["outcomes"] == [
+        {"outcome": "Yes", "token_id": "tok_yes", "price": 0.5},
+        {"outcome": "No", "token_id": "tok_no", "price": 0.5},
+    ]
     # must be JSON-serializable (round-trips cleanly)
     assert json.loads(json.dumps(d)) == d

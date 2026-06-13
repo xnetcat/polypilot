@@ -24,6 +24,7 @@ class Market:
     end_date: str
     active: bool
     tokens: list[dict]
+    is_binary: bool = True
 
     @property
     def implied_probability(self) -> float:
@@ -40,6 +41,15 @@ class Market:
             "end_date": self.end_date,
             "active": self.active,
             "tokens": self.tokens,
+            "is_binary": self.is_binary,
+            "outcomes": [
+                {
+                    "outcome": t.get("outcome"),
+                    "token_id": t.get("token_id"),
+                    "price": t.get("price"),
+                }
+                for t in self.tokens
+            ],
         }
 
 
@@ -96,11 +106,17 @@ def fetch_active_markets(limit: int = 50) -> list[Market]:
             vol = float(m.get("volume", m.get("volumeNum", 0)) or 0)
             question = (m.get("question") or "").strip()
             condition_id = m.get("conditionId", m.get("condition_id", m.get("id", "")))
+            is_binary = _has_binary_tokens(token_list)
 
-            # Skip resolved or low-info markets
-            if yes_price in (0.0, 1.0) or vol == 0 or not question or not condition_id:
+            # Skip low-info / illiquid / resolved markets.
+            # The price-extreme prune (yes_price at 0.0/1.0) only makes sense for
+            # binary markets: a multi-outcome token sitting at 0.0/1.0 is a normal
+            # long-shot/lock candidate and must not drop the whole market.
+            if vol == 0 or not question or not condition_id:
                 continue
-            if not _has_binary_tokens(token_list):
+            if is_binary and yes_price in (0.0, 1.0):
+                continue
+            if not _has_usable_tokens(token_list):
                 continue
 
             markets.append(Market(
@@ -113,6 +129,7 @@ def fetch_active_markets(limit: int = 50) -> list[Market]:
                 end_date=m.get("endDate", m.get("end_date_iso", "")),
                 active=m.get("active", True),
                 tokens=token_list,
+                is_binary=is_binary,
             ))
         except (KeyError, ValueError, TypeError):
             continue
@@ -177,14 +194,14 @@ def fetch_market(condition_id: str) -> Market | None:
             question = (m.get("question") or "").strip()
             resolved_id = m.get("conditionId", m.get("condition_id", m.get("id", "")))
 
-            # Direct lookup: keep the structural checks (must be a usable binary
-            # market) but NOT the liquidity/resolution filters that
-            # fetch_active_markets uses to prune its volume-sorted scan — the
-            # caller asked for THIS market by id, so return it even if 0-volume
-            # or priced at an extreme.
+            # Direct lookup: keep the structural checks (must be a usable market
+            # with at least 2 tradable tokens) but NOT the liquidity/resolution
+            # filters that fetch_active_markets uses to prune its volume-sorted
+            # scan — the caller asked for THIS market by id, so return it even if
+            # 0-volume or priced at an extreme.
             if not question or not resolved_id:
                 continue
-            if not _has_binary_tokens(token_list):
+            if not _has_usable_tokens(token_list):
                 continue
 
             return Market(
@@ -197,6 +214,7 @@ def fetch_market(condition_id: str) -> Market | None:
                 end_date=m.get("endDate", m.get("end_date_iso", "")),
                 active=m.get("active", True),
                 tokens=token_list,
+                is_binary=_has_binary_tokens(token_list),
             )
         except (KeyError, ValueError, TypeError):
             continue
@@ -245,7 +263,7 @@ def _fetch_from_clob(limit: int) -> list[Market]:
             condition_id = m.get("condition_id", m.get("id", ""))
             question = (m.get("question", "") or "").strip()
             volume = float(m.get("volume", 0) or 0)
-            if not condition_id or not question or not _has_binary_tokens(token_list):
+            if not condition_id or not question or not _has_usable_tokens(token_list):
                 continue
 
             markets.append(Market(
@@ -258,6 +276,7 @@ def _fetch_from_clob(limit: int) -> list[Market]:
                 end_date=m.get("end_date_iso", m.get("end_date", "")),
                 active=m.get("active", True),
                 tokens=token_list,
+                is_binary=_has_binary_tokens(token_list),
             ))
         except (KeyError, TypeError, ValueError):
             continue
@@ -368,6 +387,30 @@ def _normalize_tokens(
 def _has_binary_tokens(tokens: list[dict]) -> bool:
     outcomes = {str(token.get("outcome", "")).upper() for token in tokens}
     return outcomes == {"YES", "NO"}
+
+
+def _is_usable_token(token: dict) -> bool:
+    """A token is tradable if it has a token_id, an outcome label, and a price."""
+    if not isinstance(token, dict):
+        return False
+    if not str(token.get("token_id", "")).strip():
+        return False
+    if not str(token.get("outcome", "")).strip():
+        return False
+    price = token.get("price")
+    if isinstance(price, bool):
+        return False
+    return isinstance(price, (int, float))
+
+
+def _has_usable_tokens(tokens: list[dict]) -> bool:
+    """Markets need at least two tradable tokens to be worth surfacing.
+
+    Replaces the old strict YES/NO gate so multi-outcome markets (N>2 candidate
+    tokens) pass discovery. Degenerate markets (0 or 1 usable token) are still
+    dropped.
+    """
+    return sum(1 for token in tokens if _is_usable_token(token)) >= 2
 
 
 def _contains_keyword(text: str, keyword: str) -> bool:
