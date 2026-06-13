@@ -42,8 +42,10 @@ pass, no waiting), not the rules or who decides.
       real order is placed until preflight passes.
    2. `sync_live_balance()` — true-up local cash to the real on-chain USDC,
       correcting drift / restart staleness.
-   3. `import_live_positions()` — adopt any on-chain positions not tracked locally.
-   4. `sync_live_positions()` — report any remaining chain-vs-local drift.
+   3. `sync_live_positions()` — report (read-only) any chain-vs-local drift.
+   4. **Do NOT auto-adopt pre-existing on-chain positions** — by default manage
+      ONLY positions this bot opens, starting fresh on the synced cash. Call
+      `import_live_positions()` only if the user explicitly asks to take them over.
    This makes the local books match the actual wallet after the restart before the
    bot trades. **Paper mode SKIPS this entirely** — the paper ledger is
    self-consistent and authoritative, so none of these tools apply. The

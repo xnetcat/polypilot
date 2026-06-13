@@ -34,10 +34,12 @@ in-session loop** until the user stops you or the kill-switch trips.
       placed until preflight passes.
    2. `sync_live_balance()` — true-up local cash to the real on-chain USDC,
       correcting any drift or restart staleness.
-   3. `import_live_positions()` — adopt any on-chain positions not yet tracked
-      locally into local state.
-   4. `sync_live_positions()` — report any remaining drift between the chain and
-      the local books.
+   3. `sync_live_positions()` — report (read-only) any drift between on-chain and
+      locally-tracked positions, so you're aware of what's already on the wallet.
+   4. **Do NOT auto-adopt pre-existing on-chain positions.** By default the bot
+      manages ONLY positions it opens itself and starts fresh on the synced cash
+      balance. Call `import_live_positions()` to take over existing on-chain
+      positions ONLY if the user explicitly asks.
    In plain terms: this makes your local books match your actual wallet after any
    restart or gap, before the bot trades. **Paper mode SKIPS this entirely** — the
    paper ledger is self-consistent and authoritative, so none of these tools apply.
@@ -47,9 +49,8 @@ in-session loop** until the user stops you or the kill-switch trips.
 > **Live-only preamble.** On the FIRST cycle of a live session you will already
 > have run the Live startup reconciliation above. If a live session has been
 > idle or the process was restarted between cycles, re-run that reconciliation
-> (`preflight_live` → `sync_live_balance` → `import_live_positions` →
-> `sync_live_positions`) before resuming trades so the local books still match
-> the wallet. In paper mode skip this — the ledger is authoritative. As always,
+> (`preflight_live` → `sync_live_balance` → `sync_live_positions`) before
+> resuming trades so the local books still match the wallet. In paper mode skip this — the ledger is authoritative. As always,
 > a tripped kill-switch halts the loop and no real order is placed until
 > `preflight_live` returns `ok`.
 0. **Safety** — `get_risk_status()`. If `breaker_tripped`, STOP and report.
