@@ -177,6 +177,162 @@ def test_alias_coin_skips_search_network(monkeypatch):
     assert result["spot_usd"] == 0.55
 
 
+# --- Binance public-API fallback (CoinGecko 429 / rate limit) --------------
+
+
+def _binance_ticker(last="64000.00", change="1.23", vol="123456.0"):
+    """A Binance /ticker/24hr JSON payload."""
+    return {
+        "symbol": "BTCUSDT",
+        "lastPrice": last,
+        "priceChangePercent": change,
+        "quoteVolume": vol,
+    }
+
+
+def _binance_klines(prices):
+    """A Binance /klines payload; close is row[4] (a string)."""
+    return [[0, "0", "0", "0", f"{p}", "0", 0] for p in prices]
+
+
+def test_spot_falls_back_to_binance_when_coingecko_429(monkeypatch):
+    # CoinGecko /simple/price raises (429-like); Binance /ticker/24hr resolves.
+    crypto._CACHE.clear()
+
+    def _get(url, *a, **k):
+        class R:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return _binance_ticker()
+
+        if "/simple/price" in url:
+            raise RuntimeError("429 Too Many Requests")
+        if "binance" in url and "/ticker/24hr" in url:
+            return R()
+        # market_chart / klines for the probability path (not asserted here).
+        return R()
+
+    monkeypatch.setattr(crypto.httpx, "get", _get)
+    result = crypto.fetch_crypto("Will Bitcoin be above $70k?")
+    assert result["source"] == "binance"
+    assert result["spot_usd"] == 64000.0
+    assert result["change_24h"] == 1.23
+    assert result["volume_24h"] == 123456.0
+
+
+def test_spot_falls_back_to_binance_when_coingecko_price_zero(monkeypatch):
+    # CoinGecko returns price 0 (no error) -> Binance still takes over.
+    crypto._CACHE.clear()
+
+    def _get(url, *a, **k):
+        class R:
+            def __init__(self, payload):
+                self._payload = payload
+
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return self._payload
+
+        if "/simple/price" in url:
+            return R({"bitcoin": {"usd": 0, "usd_24h_change": 0, "usd_24h_vol": 0}})
+        if "binance" in url and "/ticker/24hr" in url:
+            return R(_binance_ticker(last="65000.00", change="2.0", vol="999.0"))
+        return R({})
+
+    monkeypatch.setattr(crypto.httpx, "get", _get)
+    result = crypto.fetch_crypto("Will Bitcoin be above $70k?")
+    assert result["source"] == "binance"
+    assert result["spot_usd"] == 65000.0
+
+
+def test_probability_uses_binance_series_when_coingecko_empty(monkeypatch):
+    # CoinGecko spot succeeds, but its market_chart series is empty; the
+    # probability path then falls back to Binance /klines and is computed.
+    crypto._CACHE.clear()
+    prices = _alternating_price_series()
+    sigma = _expected_daily_sigma(prices)
+    expected = _hand_prob_band(_SPOT, 63500.0, 64500.0, sigma, 7)
+
+    def _get(url, *a, **k):
+        class R:
+            def __init__(self, payload):
+                self._payload = payload
+
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return self._payload
+
+        if "/simple/price" in url:
+            return R({"bitcoin": {"usd": _SPOT, "usd_24h_change": 0.2, "usd_24h_vol": 1.0}})
+        if "/market_chart" in url:
+            return R({"prices": []})  # CoinGecko series empty
+        if "binance" in url and "/klines" in url:
+            return R(_binance_klines(prices))
+        return R({})
+
+    monkeypatch.setattr(crypto.httpx, "get", _get)
+    monkeypatch.setattr(crypto, "_parse_horizon_days", lambda q, today: (7, None))
+    result = crypto.fetch_crypto("Will Bitcoin be between $63,500 and $64,500?")
+    prob = result["probability"]
+    assert prob["kind"] == "band"
+    assert prob["model"] == "lognormal"
+    assert prob["daily_vol"] == round(sigma, 6)
+    assert abs(prob["estimate"] - expected) < 1e-4
+
+
+def test_binance_host_rotation(monkeypatch):
+    # First Binance host raises; the second (data-api.binance.vision) succeeds.
+    crypto._CACHE.clear()
+
+    def _get(url, *a, **k):
+        class R:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return _binance_ticker(last="63000.00")
+
+        if "/simple/price" in url:
+            raise RuntimeError("429 Too Many Requests")
+        if "api.binance.com" in url:
+            raise RuntimeError("primary host blocked")
+        if "data-api.binance.vision" in url and "/ticker/24hr" in url:
+            return R()
+        return R()
+
+    monkeypatch.setattr(crypto.httpx, "get", _get)
+    result = crypto.fetch_crypto("Will Bitcoin be above $70k?")
+    assert result["source"] == "binance"
+    assert result["spot_usd"] == 63000.0
+
+
+def test_both_providers_fail_returns_error(monkeypatch):
+    # CoinGecko raises AND Binance has no data -> graceful error, no crash.
+    crypto._CACHE.clear()
+
+    def _get(url, *a, **k):
+        class R:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {}  # empty Binance payload -> price 0 -> None
+
+        if "/simple/price" in url:
+            raise RuntimeError("429 Too Many Requests")
+        return R()
+
+    monkeypatch.setattr(crypto.httpx, "get", _get)
+    result = crypto.fetch_crypto("Will Bitcoin be above $70k?")
+    assert "error" in result
+
+
 # --- band/threshold probability -------------------------------------------
 
 

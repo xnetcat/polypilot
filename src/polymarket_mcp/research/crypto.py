@@ -45,6 +45,12 @@ DEFAULT_HORIZON_DAYS = 7
 # Number of daily samples requested from CoinGecko for the volatility estimate.
 _VOL_WINDOW_DAYS = 30
 
+# Binance public-API hosts, tried in order. CoinGecko free tier rate-limits
+# (HTTP 429) under load, so Binance is a no-key fallback for spot and candles.
+# The two hosts serve identical paths; ``data-api.binance.vision`` is Binance's
+# public market-data mirror and survives when the primary host is blocked.
+_BINANCE_HOSTS = ("api.binance.com", "data-api.binance.vision")
+
 # Curated fast-path aliases for common / ambiguous coins, mapping a name or
 # ticker (matched as a whole word, case-insensitively) to its CoinGecko id and a
 # display symbol. This is NOT the universe of supported coins — it only short-
@@ -294,6 +300,78 @@ def _fetch_daily_prices(coin_id: str) -> list[float]:
         return []
 
 
+def _fetch_spot_binance(symbol: str) -> dict | None:
+    """Fetch spot/24h stats from Binance's public ``ticker/24hr`` endpoint.
+
+    ``symbol`` is the bare ticker (e.g. ``"BTC"``); it is uppercased and paired
+    against ``USDT`` (``BTCUSDT``). Returns ``{"price", "change_24h_pct",
+    "volume_24h_usd"}`` or ``None`` on failure/empty. Hosts are rotated (see
+    ``_BINANCE_HOSTS``) so a blocked primary still resolves via the mirror. Many
+    coins aren't listed on Binance — that's fine, callers keep what they had.
+    """
+    if not symbol:
+        return None
+    pair = f"{symbol.upper()}USDT"
+    for host in _BINANCE_HOSTS:
+        try:
+            resp = httpx.get(
+                f"https://{host}/api/v3/ticker/24hr",
+                params={"symbol": pair},
+                timeout=10,
+            )
+            resp.raise_for_status()
+            data = resp.json() or {}
+            price = float(data.get("lastPrice", 0) or 0)
+            if price <= 0:
+                continue
+            return {
+                "price": price,
+                "change_24h_pct": float(data.get("priceChangePercent", 0) or 0),
+                "volume_24h_usd": float(data.get("quoteVolume", 0) or 0),
+            }
+        except Exception as e:  # noqa: BLE001 — best-effort, try next host.
+            log.debug("[research] Binance ticker/24hr error (%s): %s", host, e)
+            continue
+    return None
+
+
+def _fetch_daily_prices_binance(symbol: str) -> list[float]:
+    """Fetch a recent daily close series from Binance's ``klines`` endpoint.
+
+    ``symbol`` is the bare ticker (paired against ``USDT``). Returns the list of
+    close prices (``row[4]`` of each kline, parsed to float). Returns ``[]`` on
+    any error. Hosts are rotated like ``_fetch_spot_binance``.
+    """
+    if not symbol:
+        return []
+    pair = f"{symbol.upper()}USDT"
+    for host in _BINANCE_HOSTS:
+        try:
+            resp = httpx.get(
+                f"https://{host}/api/v3/klines",
+                params={
+                    "symbol": pair,
+                    "interval": "1d",
+                    "limit": _VOL_WINDOW_DAYS,
+                },
+                timeout=10,
+            )
+            resp.raise_for_status()
+            rows = resp.json() or []
+            out: list[float] = []
+            for row in rows:
+                try:
+                    out.append(float(row[4]))
+                except (TypeError, ValueError, IndexError):
+                    continue
+            if out:
+                return out
+        except Exception as e:  # noqa: BLE001 — best-effort, try next host.
+            log.debug("[research] Binance klines error (%s): %s", host, e)
+            continue
+    return []
+
+
 def _daily_log_return_sigma(prices: list[float]) -> float | None:
     """Stdev of daily log-returns for ``prices``. ``None`` if < 2 returns."""
     rets: list[float] = []
@@ -455,6 +533,11 @@ def _get_crypto_research(question: str) -> dict | None:
         return None
     coin_id, matched_keyword, symbol = resolved
 
+    # Primary spot source: CoinGecko /simple/price. On any error (e.g. 429 rate
+    # limit) or a non-positive price, fall through to the Binance public API.
+    price = change = vol = 0.0
+    source = "coingecko"
+    source_url = f"https://www.coingecko.com/en/coins/{coin_id}"
     try:
         resp = httpx.get(
             "https://api.coingecko.com/api/v3/simple/price",
@@ -471,45 +554,67 @@ def _get_crypto_research(question: str) -> dict | None:
         price = float(data.get("usd", 0) or 0)
         change = float(data.get("usd_24h_change", 0) or 0)
         vol = float(data.get("usd_24h_vol", 0) or 0)
-        result: dict = {
-            "coin_id": coin_id,
-            "symbol": symbol or coin_id.upper(),
-            "symbol_hint": matched_keyword,
-            "price_usd": price,
-            "change_24h_pct": change,
-            "volume_24h_usd": vol,
-            "source": "coingecko",
-            "source_url": f"https://www.coingecko.com/en/coins/{coin_id}",
-        }
-        price_match = re.search(r"\$?([\d,]+)", question.replace(",", ""))
-        if price_match:
-            target = float(price_match.group(1).replace(",", ""))
-            if target > 100:
-                result["target_price"] = target
-                result["diff_pct"] = round(((price - target) / target) * 100, 3)
-                q_lower = question.lower()
-                if "above" in q_lower or "over" in q_lower:
-                    result["threshold_direction"] = "above"
-                elif "below" in q_lower or "under" in q_lower:
-                    result["threshold_direction"] = "below"
-        if "up or down" in q:
-            result["market_type"] = "up_or_down"
-        elif "above" in q or "below" in q or "over" in q or "under" in q:
-            result["market_type"] = "threshold"
-        else:
-            result["market_type"] = "other"
-        cache_set(_CACHE, question, result)
-        return result
     except Exception as e:
-        log.debug("[research] Crypto fetch error: %s", e)
+        log.debug("[research] Crypto CoinGecko spot error: %s", e)
+        price = 0.0
+
+    # Binance fallback when CoinGecko failed or returned an unusable price. Only
+    # the price/change/volume/source differ — all other result keys are shared.
+    if price <= 0:
+        binance = _fetch_spot_binance(symbol)
+        if binance is not None:
+            price = binance["price"]
+            change = binance["change_24h_pct"]
+            vol = binance["volume_24h_usd"]
+            source = "binance"
+            source_url = f"https://www.binance.com/en/trade/{(symbol or '').upper()}_USDT"
+
+    # Both providers failed -> preserve the original "no data" behaviour.
+    if price <= 0:
         return None
 
+    result: dict = {
+        "coin_id": coin_id,
+        "symbol": symbol or coin_id.upper(),
+        "symbol_hint": matched_keyword,
+        "price_usd": price,
+        "change_24h_pct": change,
+        "volume_24h_usd": vol,
+        "source": source,
+        "source_url": source_url,
+    }
+    price_match = re.search(r"\$?([\d,]+)", question.replace(",", ""))
+    if price_match:
+        target = float(price_match.group(1).replace(",", ""))
+        if target > 100:
+            result["target_price"] = target
+            result["diff_pct"] = round(((price - target) / target) * 100, 3)
+            q_lower = question.lower()
+            if "above" in q_lower or "over" in q_lower:
+                result["threshold_direction"] = "above"
+            elif "below" in q_lower or "under" in q_lower:
+                result["threshold_direction"] = "below"
+    if "up or down" in q:
+        result["market_type"] = "up_or_down"
+    elif "above" in q or "below" in q or "over" in q or "under" in q:
+        result["market_type"] = "threshold"
+    else:
+        result["market_type"] = "other"
+    cache_set(_CACHE, question, result)
+    return result
 
-def _build_probability(question: str, coin_id: str, spot: float) -> dict | None:
+
+def _build_probability(
+    question: str, coin_id: str, symbol: str, spot: float
+) -> dict | None:
     """Best-effort lognormal probability block for the question's band/threshold.
 
     Returns the ``probability`` dict or ``None`` (never raises). ``None`` means
     the band was unparseable, the series too short, or spot/vol unusable.
+
+    The daily series comes from CoinGecko ``market_chart``; when that yields
+    fewer than 2 usable points (e.g. CoinGecko rate-limited), it falls back to
+    Binance ``klines`` keyed by ``symbol``.
     """
     try:
         band = _parse_band(question)
@@ -518,6 +623,8 @@ def _build_probability(question: str, coin_id: str, spot: float) -> dict | None:
         if spot <= 0:
             return None
         prices = _fetch_daily_prices(coin_id)
+        if len(prices) < 2:
+            prices = _fetch_daily_prices_binance(symbol)
         daily_sigma = _daily_log_return_sigma(prices)
         if daily_sigma is None:
             return None
@@ -559,7 +666,7 @@ def fetch_crypto(question: str) -> dict:
             "direction": research.get("threshold_direction"),
         }
 
-    probability = _build_probability(question, coin_id, spot)
+    probability = _build_probability(question, coin_id, result["symbol"], spot)
     if probability is not None:
         result["probability"] = probability
 
