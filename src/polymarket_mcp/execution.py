@@ -208,6 +208,17 @@ def _get_clob_client():
     global _clob_client
     if _clob_client is not None:
         return _clob_client
+    # Route ALL CLOB trading calls (place/cancel/sell/balance/positions) through
+    # the configured proxy when set — e.g. a permitted-region exit, since
+    # Polymarket geo-gates order placement. py_clob_client sends every request
+    # via a module-global httpx client, so we replace it with a proxied one.
+    if config.HTTP_PROXY:
+        try:
+            import py_clob_client.http_helpers.helpers as _helpers
+            import httpx as _httpx
+            _helpers._http_client = _httpx.Client(http2=True, proxy=config.HTTP_PROXY)
+        except Exception:
+            pass
     from py_clob_client.client import ClobClient
     client = ClobClient(host=config.POLYMARKET_HOST,
                         key=config.POLYMARKET_PRIVATE_KEY, chain_id=137,
