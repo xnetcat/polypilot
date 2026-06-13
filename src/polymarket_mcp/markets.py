@@ -73,6 +73,7 @@ def fetch_active_markets(limit: int = 50) -> list[Market]:
             outcome_prices = m.get("outcomePrices", "")
             yes_price = 0.5
             no_price = 0.5
+            prices: list = []  # always bound, even if outcomePrices is malformed JSON
 
             if outcome_prices:
                 try:

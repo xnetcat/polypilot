@@ -37,3 +37,17 @@ def test_to_dict_is_json_serializable(monkeypatch):
     d = markets.fetch_active_markets(limit=1)[0].to_dict()
     json.dumps(d)  # must not raise
     assert d["yes_price"] == 0.40
+
+
+def test_malformed_outcome_prices_does_not_crash(monkeypatch):
+    # outcomePrices is truthy but invalid JSON — must not raise NameError on
+    # the unbound `prices` variable; the row should parse with default 0.5/0.5
+    # prices (and may be skipped only by the legitimate price/volume filters).
+    bad_row = {**GAMMA_ROW, "outcomePrices": "not-json", "volume": "5000"}
+
+    class FakeResp:
+        def raise_for_status(self): pass
+        def json(self): return [bad_row]
+    monkeypatch.setattr(markets.httpx, "get", lambda *a, **k: FakeResp())
+    result = markets.fetch_active_markets(limit=10)  # must not raise
+    assert isinstance(result, list)
