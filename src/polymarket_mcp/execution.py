@@ -86,8 +86,15 @@ def _live_fill(market_id, token_id, question, category, side, size_usd,
         return {"status": "error", "reason": f"order status {resp.get('status')}"}
     taking = float(resp.get("takingAmount") or 0)   # shares received
     making = float(resp.get("makingAmount") or 0)   # usdc spent
-    shares = round(taking, 2) if taking else round(amount / (making / taking) if taking else 0, 2)
-    fill_price = round(making / taking, 4) if taking else 0.0
+    # No-fill guard: a 'matched'/'delayed' status can still carry zero shares
+    # (e.g. sports markets that delay before matching). Do NOT record a zombie
+    # position with 0 shares — mirrors executor.py's `if taking and taking != "0"`.
+    if not taking:
+        return {"status": "no_fill",
+                "reason": "order matched/delayed but no fill amount yet",
+                "order_id": resp.get("orderID", "")}
+    shares = round(taking, 2)
+    fill_price = round(making / taking, 4)
     pos_id = state.open_position("live", market_id=market_id, token_id=token_id,
         question=question, category=category, side=side, entry_price=fill_price,
         size_usd=making or amount, shares=shares, fair_prob=fair_prob,
@@ -132,17 +139,84 @@ def reconcile_positions(mode: str | None = None) -> dict:
     return {"settled": settled, "details": details}
 
 
+def _live_sell(token_id: str, shares: float) -> dict:
+    """Sell `shares` of a CLOB token via a FAK SELL market order.
+    Ported from executor.py `sell_position`. Returns a dict with `status` and,
+    on success, `shares_sold` + `usdc_received`. Does NOT touch local state."""
+    if not config.POLYMARKET_PRIVATE_KEY:
+        return {"status": "error", "reason": "POLYMARKET_PRIVATE_KEY not set",
+                "shares_sold": 0.0}
+    import math
+
+    from py_clob_client.clob_types import MarketOrderArgs, OrderType
+    client = _get_clob_client()
+
+    # Query the actual token balance to avoid "not enough balance" errors;
+    # never try to sell more than we actually hold.
+    try:
+        from py_clob_client.clob_types import BalanceAllowanceParams
+        bal = client.get_balance_allowance(
+            BalanceAllowanceParams(asset_type="CONDITIONAL", token_id=token_id))
+        actual_balance = float(bal.get("balance", "0")) / 1e6
+        if 0 < actual_balance < shares:
+            shares = actual_balance
+    except Exception:
+        pass  # fall through with the requested share count
+
+    sell_shares = math.floor(shares * 100) / 100  # floor to 2dp, never exceed balance
+    if sell_shares < 0.1:
+        return {"status": "error", "reason": "sell size below minimum (0.1 shares)",
+                "shares_sold": 0.0}
+
+    args = MarketOrderArgs(token_id=token_id, amount=sell_shares, side="SELL")
+    try:
+        signed = client.create_market_order(args)
+        resp = client.post_order(signed, OrderType.FAK)
+    except Exception as e:
+        msg = str(e)
+        if "no orders found to match" in msg or "FAK" in msg:
+            return {"status": "no_liquidity", "reason": "no buyer liquidity to sell into",
+                    "shares_sold": 0.0}
+        return {"status": "error", "reason": f"{type(e).__name__}: {e}",
+                "shares_sold": 0.0}
+    if resp.get("status") not in ("matched", "delayed"):
+        return {"status": "error", "reason": f"sell order status {resp.get('status')}",
+                "shares_sold": 0.0}
+    taking = float(resp.get("takingAmount") or 0)   # usdc received for a SELL
+    if not taking:
+        return {"status": "no_liquidity", "reason": "sell matched but no proceeds yet",
+                "shares_sold": 0.0}
+    return {"status": "sold", "shares_sold": sell_shares, "usdc_received": taking,
+            "order_id": resp.get("orderID", "")}
+
+
 def close_position(mode: str | None = None, *, position_id: int) -> dict:
-    """Sell an open position at the current best bid (paper) or via CLOB (live)."""
+    """Sell an open position at the current best bid (paper) or via the CLOB (live)."""
     mode = mode or config.MODE
     positions = {p["id"]: p for p in state.get_positions(mode, status="open")}
     pos = positions.get(position_id)
     if pos is None:
         return {"status": "rejected", "reason": f"position {position_id} not open"}
-    book = order_book.fetch_order_book(pos["token_id"])
-    bid = book.get("best_bid")
-    if bid is None:
-        return {"status": "rejected", "reason": "no bid liquidity to sell into"}
-    payout = pos["shares"] * bid
-    r = state.close_position(mode, position_id, exit_price=bid, payout=payout)
-    return {"status": "closed", "exit_price": bid, **r}
+
+    if mode == "paper":
+        book = order_book.fetch_order_book(pos["token_id"])
+        bid = book.get("best_bid")
+        if bid is None:
+            return {"status": "rejected", "reason": "no bid liquidity to sell into"}
+        payout = pos["shares"] * bid
+        r = state.close_position(mode, position_id, exit_price=bid, payout=payout)
+        if "error" in r:
+            return {"status": "rejected", **r}
+        return {"status": "closed", "exit_price": bid, **r}
+
+    # Live mode: actually sell on the CLOB, then settle locally with real proceeds.
+    sale = _live_sell(pos["token_id"], pos["shares"])
+    if sale["status"] != "sold":
+        return {"status": sale["status"], "reason": sale.get("reason", "")}
+    shares_sold = sale["shares_sold"]
+    proceeds = sale["usdc_received"]
+    exit_price = round(proceeds / shares_sold, 4) if shares_sold else 0.0
+    r = state.close_position(mode, position_id, exit_price=exit_price, payout=proceeds)
+    if "error" in r:
+        return {"status": "rejected", **r}
+    return {"status": "closed", "exit_price": exit_price, **r}
