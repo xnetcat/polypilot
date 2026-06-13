@@ -22,6 +22,47 @@ def test_clob_client_installs_proxy_when_configured(monkeypatch):
         ex._clob_client = None
 
 
+def test_config_exports_standard_proxy_env(monkeypatch):
+    # Setting POLYPILOT_HTTP_PROXY exports the standard HTTPS_PROXY/HTTP_PROXY
+    # (which httpx honors) so ALL requests in the process route through it.
+    import importlib
+    import os
+    import polymarket_mcp.config as cfg
+    monkeypatch.setenv("POLYPILOT_HTTP_PROXY", "http://u:p@9.9.9.9:8000")
+    monkeypatch.delenv("HTTPS_PROXY", raising=False)
+    monkeypatch.delenv("HTTP_PROXY", raising=False)
+    try:
+        importlib.reload(cfg)
+        assert cfg.HTTP_PROXY == "http://u:p@9.9.9.9:8000"
+        assert os.environ.get("HTTPS_PROXY") == "http://u:p@9.9.9.9:8000"
+        assert os.environ.get("HTTP_PROXY") == "http://u:p@9.9.9.9:8000"
+    finally:
+        os.environ.pop("HTTPS_PROXY", None)
+        os.environ.pop("HTTP_PROXY", None)
+        monkeypatch.delenv("POLYPILOT_HTTP_PROXY", raising=False)
+        importlib.reload(cfg)
+
+
+def test_geoblock_error_returns_actionable_proxy_hint(monkeypatch):
+    # A 403 geoblock on order placement must surface a clear proxy/restart hint,
+    # not a raw exception string.
+    monkeypatch.setattr(ex.config, "POLYMARKET_PRIVATE_KEY", "0xkey")
+    monkeypatch.setattr(ex.config, "HTTP_PROXY", "")   # proxy NOT applied
+
+    class _Client:
+        def create_market_order(self, args): return {"signed": True}
+        def post_order(self, order, otype):
+            raise Exception("PolyApiException[status_code=403, error_message="
+                            "{'error': 'Trading restricted in your region'}]")
+    monkeypatch.setattr(ex, "_get_clob_client", lambda: _Client())
+
+    res = ex._live_fill("m", "tok", "q", "weather", "YES", 5.0, 0.6, 0.6, "t",
+                        "market", None)
+    assert res["status"] == "error"
+    assert "geoblock" in res["reason"].lower()
+    assert "NOT SET" in res["reason"] and "RESTART" in res["reason"]
+
+
 def test_clob_client_untouched_without_proxy(monkeypatch):
     monkeypatch.setattr(ex.config, "HTTP_PROXY", "")
     monkeypatch.setattr("py_clob_client.client.ClobClient", lambda **k: _FakeClob())

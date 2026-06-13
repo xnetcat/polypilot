@@ -229,6 +229,21 @@ def _get_clob_client():
     return client
 
 
+def _geoblock_reason(msg: str) -> str | None:
+    """If a CLOB error is a regional geoblock (403), return an actionable reason
+    naming the proxy requirement; else None."""
+    low = msg.lower()
+    if "restricted in your region" in low or "geoblock" in low or "geo-block" in low:
+        state_str = "SET" if config.HTTP_PROXY else "NOT SET"
+        return ("Polymarket geoblocked this order (403 — trading restricted in "
+                f"your region). The trading client must route through a proxy. "
+                f"POLYPILOT_HTTP_PROXY is {state_str} for this process. If NOT SET, "
+                "set it and RESTART the bot/MCP server — an MCP server's env is "
+                "fixed at launch, so a proxy added after it started won't apply "
+                "until you relaunch.")
+    return None
+
+
 def _live_fill(market_id, token_id, question, category, side, size_usd,
                fair_prob, confidence, thesis, order_type="market",
                limit_price=None) -> dict:
@@ -249,6 +264,9 @@ def _live_fill(market_id, token_id, question, category, side, size_usd,
         msg = str(e)
         if "no orders found to match" in msg or "FAK" in msg:
             return {"status": "rejected", "reason": "no live liquidity"}
+        geo = _geoblock_reason(msg)
+        if geo:
+            return {"status": "error", "reason": geo}
         return {"status": "error", "reason": f"{type(e).__name__}: {e}"}
     if resp.get("status") not in ("matched", "delayed"):
         return {"status": "error", "reason": f"order status {resp.get('status')}"}
@@ -306,6 +324,9 @@ def _live_limit_fill(market_id, token_id, question, category, side, size_usd,
         msg = str(e)
         if "no orders found to match" in msg or "FAK" in msg:
             return {"status": "rejected", "reason": "no live liquidity"}
+        geo = _geoblock_reason(msg)
+        if geo:
+            return {"status": "error", "reason": geo}
         return {"status": "error", "reason": f"{type(e).__name__}: {e}"}
     status = resp.get("status", "")
     if status not in ("matched", "delayed", "live"):
@@ -817,6 +838,12 @@ def preflight_live() -> dict:
         config.KILL_SWITCH_DAILY_USD > 0 and config.KILL_SWITCH_TOTAL_USD > 0)
     checks["kill_switch_daily_usd"] = config.KILL_SWITCH_DAILY_USD
     checks["kill_switch_total_usd"] = config.KILL_SWITCH_TOTAL_USD
+
+    # 5. Proxy configured for THIS process? Polymarket geoblocks order placement
+    # by region; if you're in a restricted region you need a proxy or live trades
+    # will 403. Informational (not part of `ok`): trading may be permitted without
+    # one depending on your location.
+    checks["proxy_configured"] = bool(config.HTTP_PROXY)
 
     ok = (checks["private_key_set"] and checks["clob_creds_derivable"]
           and checks["balance_positive"] and checks["kill_switch_configured"])

@@ -8,3 +8,8 @@ via monkeypatch.
 import os
 
 os.environ["POLYPILOT_MODE"] = "paper"
+# Never let an ambient proxy (this dev machine may export POLYPILOT_HTTP_PROXY
+# for live trading) activate during tests — config would otherwise export
+# HTTPS_PROXY and route mocked requests oddly. Keep the suite fully hermetic.
+for _v in ("POLYPILOT_HTTP_PROXY", "HTTP_PROXY", "HTTPS_PROXY"):
+    os.environ.pop(_v, None)

@@ -42,6 +42,16 @@ POLYMARKET_PRIVATE_KEY: str = os.getenv("POLYMARKET_PRIVATE_KEY", "")
 POLYMARKET_PROXY_ADDRESS: str = os.getenv("POLYMARKET_PROXY_ADDRESS", "")
 POLYMARKET_SIGNATURE_TYPE: int = _int("POLYMARKET_SIGNATURE_TYPE", 0)
 HTTP_PROXY: str = os.getenv("POLYPILOT_HTTP_PROXY", "")
+# When a proxy is configured, export the STANDARD proxy env vars *in this
+# process* so httpx (which honors HTTPS_PROXY/HTTP_PROXY via trust_env) routes
+# ALL Polymarket calls — order placement AND data reads — through it. This
+# mirrors the proven predecessor implementation and is more robust than patching
+# py_clob_client's client alone. Scoped to this process (the MCP server), so it
+# does NOT proxy the host Claude Code session's own traffic (hence the custom
+# POLYPILOT_HTTP_PROXY trigger rather than a global HTTP_PROXY).
+if HTTP_PROXY and not os.getenv("HTTPS_PROXY"):
+    os.environ["HTTPS_PROXY"] = HTTP_PROXY
+    os.environ["HTTP_PROXY"] = HTTP_PROXY
 GAMMA_API: str = "https://gamma-api.polymarket.com"
 
 # --- Optional research API keys ---
