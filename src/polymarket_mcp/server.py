@@ -11,6 +11,7 @@ from . import order_book as _order_book
 from . import pacing as _pacing
 from . import replay as _replay
 from . import risk as _risk
+from . import signals as _signals
 from . import state as _state
 from .research import crypto as _crypto
 from .research import economic as _economic
@@ -99,6 +100,16 @@ def get_price_history(token_id: str, interval: str = "1d") -> dict:
     return _order_book.fetch_price_history(token_id, interval)
 
 
+@mcp.tool()
+def get_market_signals(token_id: str) -> dict:
+    """Technical reads for a CLOB token id (momentum/divergence/pullback/z-score/
+    imbalance) derived from price history + order book, to inform a thesis. Returns
+    momentum, trend, price_change, pullback, imbalance, divergence, spread,
+    midpoint, points, and a one-line summary — or {'error': ...} on a fetch
+    failure; never raises. ADVISORY: technical context, not a trade gate."""
+    return _signals.market_signals(token_id)
+
+
 # --- Analytics tools ---
 
 
@@ -149,9 +160,9 @@ def get_weather_forecast(question: str) -> dict:
 
 @mcp.tool()
 def get_crypto(question: str) -> dict:
-    """Crypto spot price, 24h change, recent history, and (if the `ml` extra is
-    installed) a Chronos direction prediction. Parses the asset from the
-    question. Use to form a thesis on crypto markets."""
+    """Crypto spot price, 24h change, recent history, and the threshold direction
+    for the market's target. Parses the asset from the question. Use to form a
+    thesis on crypto markets."""
     return _crypto.fetch_crypto(question)
 
 
@@ -437,6 +448,18 @@ def get_scorecard() -> dict:
 
 
 @mcp.tool()
+def calibrate_probability(fair_prob: float) -> dict:
+    """Shade your raw fair-prob using your OWN resolved-trade calibration before
+    sizing. Buckets `fair_prob` into the same deciles as the scorecard, then
+    returns that bucket's historical actual win rate as the calibrated estimate.
+    Falls back to the raw value when history is thin (fewer than 5 resolved trades
+    in the bucket). Returns {'raw', 'calibrated', 'samples', 'note'}; never
+    raises and never divides by zero (a non-finite/out-of-range input is clamped
+    to [0, 1] first). ADVISORY — you decide how much to trust it."""
+    return _replay.calibrate_probability(fair_prob)
+
+
+@mcp.tool()
 def list_resolved_markets(limit: int = 20) -> dict:
     """Recently RESOLVED Polymarket markets with their winning outcome — real
     closed markets you can backtest or practice forecasting against. Returns
@@ -458,6 +481,28 @@ def send_notification(event: str, message: str) -> dict:
     Never raises — transport errors are captured per-channel. Use to alert on
     fills, kill-switch trips, or end-of-cycle summaries."""
     return _notifications.notify(event, message)
+
+
+@mcp.tool()
+def notify_status() -> dict:
+    """Push a PERIODIC portfolio / P&L summary to the configured channel (a rich
+    Discord embed where applicable). Composes cash, realized / unrealized / total
+    PnL, open-position count, and mode from get_portfolio() and risk_status(), then
+    fires a 'status' notification. Returns the notify result — a strict no-op
+    ``{'sent': False, 'reason': 'no channel configured'}`` (no network) when no
+    channel is set, so it is hermetic. Use for an end-of-cycle / status snapshot;
+    fills, settlements, and kill-switch trips already auto-notify."""
+    portfolio = get_portfolio()
+    risk = _risk.risk_status()
+    return _notifications.notify(
+        "status", "Portfolio update",
+        cash=portfolio.get("cash"),
+        realized_pnl=portfolio.get("realized_pnl"),
+        unrealized_pnl=portfolio.get("unrealized_pnl"),
+        total_pnl=portfolio.get("total_pnl"),
+        open_positions=portfolio.get("open_positions"),
+        mode=risk.get("mode"),
+    )
 
 
 # --- Pacing ---

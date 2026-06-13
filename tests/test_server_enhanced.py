@@ -218,6 +218,115 @@ def test_send_notification_forwards_event_and_message(srv, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# get_market_signals -> signals.market_signals (monkeypatched)
+# --------------------------------------------------------------------------- #
+def test_get_market_signals_delegates_to_signals(srv, monkeypatch):
+    sentinel = {"token_id": "tok", "momentum": 0.5, "trend": "up",
+                "summary": "up trend"}
+    captured = {}
+
+    def fake_market_signals(token_id):
+        captured["token_id"] = token_id
+        return sentinel
+
+    monkeypatch.setattr(srv._signals, "market_signals", fake_market_signals)
+    out = srv.get_market_signals("tok")
+    assert out is sentinel
+    assert captured["token_id"] == "tok"
+
+
+def test_get_market_signals_surfaces_error_shape(srv, monkeypatch):
+    monkeypatch.setattr(srv._signals, "market_signals",
+        lambda token_id: {"error": "no price history", "token_id": token_id})
+    out = srv.get_market_signals("tok")
+    assert out == {"error": "no price history", "token_id": "tok"}
+
+
+# --------------------------------------------------------------------------- #
+# calibrate_probability -> replay.calibrate_probability
+# --------------------------------------------------------------------------- #
+def test_calibrate_probability_thin_history_falls_back_to_raw(srv):
+    # Fresh paper DB: no resolved trades -> insufficient history -> calibrated == raw.
+    out = srv.calibrate_probability(0.62)
+    assert out["raw"] == 0.62
+    assert out["calibrated"] == 0.62
+    assert out["samples"] == 0
+    assert "insufficient history" in out["note"]
+
+
+def test_calibrate_probability_calibrates_over_seeded_bucket(srv):
+    # Seed >=5 resolved buy_yes trades whose fair_prob sits in the 0.6-0.7 decile,
+    # with 3 wins / 2 losses, so the bucket's empirical win rate is 0.6.
+    outcomes = [(1.0, 12.0), (1.0, 12.0), (1.0, 12.0), (0.0, -10.0), (0.0, -10.0)]
+    for i, (res, pnl) in enumerate(outcomes):
+        mid = f"m{i}"
+        srv._state.record_evaluation("paper", market_id=mid, question="Q",
+            category="crypto", keywords="btc", decision="buy_yes", side="YES",
+            confidence=0.7, fair_prob=0.65, yes_price=0.6, thesis="t", stake_usd=10.0)
+        srv._state.update_evaluation_outcome("paper", mid, "YES", res, pnl)
+
+    out = srv.calibrate_probability(0.62)  # 0.62 lands in the 0.6-0.7 bucket
+    assert out["raw"] == 0.62
+    assert out["samples"] == 5
+    assert out["calibrated"] == 0.6  # 3 wins / 5
+    assert "calibrated to bucket win rate" in out["note"]
+
+
+def test_calibrate_probability_delegates_to_replay(srv, monkeypatch):
+    sentinel = {"raw": 0.5, "calibrated": 0.55, "samples": 9, "note": "ok"}
+    captured = {}
+
+    def fake_calibrate(fair_prob):
+        captured["fair_prob"] = fair_prob
+        return sentinel
+
+    monkeypatch.setattr(srv._replay, "calibrate_probability", fake_calibrate)
+    out = srv.calibrate_probability(0.5)
+    assert out is sentinel
+    assert captured["fair_prob"] == 0.5
+
+
+# --------------------------------------------------------------------------- #
+# notify_status -> portfolio/risk summary -> notifications.notify
+# --------------------------------------------------------------------------- #
+def test_notify_status_no_op_when_unconfigured(srv, monkeypatch):
+    # No webhook / Telegram configured (conftest wiped them) -> strict no-op:
+    # no network call (httpx.post must never fire), and the no-op shape returned.
+    monkeypatch.setattr(srv._notifications.httpx, "post",
+        lambda *a, **k: pytest.fail("no network call expected when unconfigured"))
+    # Zero open positions -> get_portfolio also makes no order-book network call.
+    monkeypatch.setattr(srv._order_book, "fetch_order_book",
+        lambda tid: pytest.fail("no network call expected with zero positions"))
+    out = srv.notify_status()
+    assert out == {"sent": False, "reason": "no channel configured"}
+
+
+def test_notify_status_composes_pnl_summary(srv, monkeypatch):
+    captured = {}
+
+    def fake_notify(event, message, **fields):
+        captured["event"] = event
+        captured["message"] = message
+        captured["fields"] = fields
+        return {"sent": True, "channels": [{"channel": "webhook", "ok": True}]}
+
+    monkeypatch.setattr(srv._notifications, "notify", fake_notify)
+    out = srv.notify_status()
+    assert out["sent"] is True
+    assert captured["event"] == "status"
+    assert captured["message"] == "Portfolio update"
+    # Composed from get_portfolio()/risk_status(): fresh paper portfolio.
+    fields = captured["fields"]
+    assert fields["cash"] == 100.0
+    assert fields["realized_pnl"] == 0.0
+    assert fields["open_positions"] == 0
+    assert fields["mode"] == "paper"
+    # Keys are always present even when unrealized enrichment is absent.
+    assert set(fields) == {"cash", "realized_pnl", "unrealized_pnl",
+                           "total_pnl", "open_positions", "mode"}
+
+
+# --------------------------------------------------------------------------- #
 # record_evaluation tool forwards stake_usd
 # --------------------------------------------------------------------------- #
 def test_record_evaluation_persists_stake_usd(srv):

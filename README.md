@@ -127,9 +127,13 @@ which is especially useful in unattended/scheduled mode. Configure either or bot
 | `POLYPILOT_TELEGRAM_CHAT_ID` | Telegram chat id to deliver messages to. |
 
 Behavior: the agent can call `send_notification` directly, and the server
-**auto-notifies** on order fills and on a kill-switch trip when a channel is
-configured. If nothing is configured, notifications are a no-op and never block
-trading.
+**auto-notifies** on order fills, on position settlements (a per-run summary from
+`reconcile_positions`), and on a kill-switch trip when a channel is configured.
+When the webhook points at Discord, notifications are sent as **rich embeds**
+(per-event title/color, with the structured fields rendered inline). The agent
+can also push a periodic P&L summary with **`notify_status`** (cash, realized /
+unrealized / total PnL, open positions, mode) at the end of each cycle. If
+nothing is configured, notifications are a no-op and never block trading.
 
 ## Multi-outcome markets
 
@@ -198,7 +202,7 @@ A single cumulative-loss circuit breaker is the one rule enforced in code:
 Everything else — strategy, edge bar, position sizing, concentration, and
 timing — is the agent's judgment, not hardcoded.
 
-## Tool surface (36 tools)
+## Tool surface (39 tools)
 
 Grouped by purpose. The agent calls what it needs; all tools return plain JSON.
 
@@ -207,10 +211,11 @@ Grouped by purpose. The agent calls what it needs; all tools return plain JSON.
 - `get_market` — full detail for one market by condition id.
 - `get_order_book` — live order book summary for a CLOB token (best bid/ask, spread, midpoint, imbalance, top levels).
 - `get_price_history` — price-history summary for a token over an interval (first/last/high/low/change).
+- `get_market_signals` — advisory technical reads for a token (momentum/divergence/pullback/z-score/imbalance) from price history + order book, to inform a thesis.
 
 **Research**
 - `get_weather_forecast` — structured forecast (high/low °C, uncertainty) parsed from a weather market question (Open-Meteo + weather.gov).
-- `get_crypto` — spot price, 24h change, recent history, and an optional Chronos direction prediction (behind the `ml` extra).
+- `get_crypto` — spot price, 24h change, recent history, and the threshold direction for the market's target.
 - `get_sports` — ESPN-backed sport/teams/status/score for a sports market.
 - `get_economic_data` — FRED-backed official economic series (requires `FRED_API_KEY`).
 - `get_news` — recent headlines (RSS, plus NewsAPI if configured) matching a topic.
@@ -236,6 +241,7 @@ Grouped by purpose. The agent calls what it needs; all tools return plain JSON.
 
 **Backtesting / calibration**
 - `get_scorecard` — decision-quality scorecard over your resolved trades (win rate, ROI, Brier score, log loss, and a 10-bucket calibration table), overall and per category; consult it to calibrate your own confidence.
+- `calibrate_probability` — shade a raw fair-prob using your own resolved-trade calibration (the bucket's historical win rate); falls back to the raw value when history is thin (`{raw, calibrated, samples, note}`).
 - `list_resolved_markets` — recently resolved real markets with their winning outcome, to backtest/practice forecasting against.
 
 **Portfolio / Memory**
@@ -254,6 +260,7 @@ Grouped by purpose. The agent calls what it needs; all tools return plain JSON.
 
 **Notifications**
 - `send_notification` — push a message to the configured webhook and/or Telegram channel (e.g. a fill or a kill-switch alert). No-op when no channel is configured; never blocks trading.
+- `notify_status` — push a periodic portfolio / P&L summary (cash, realized/unrealized/total PnL, open positions, mode) to the configured channel for end-of-cycle status updates. No-op when no channel is configured.
 
 ## Environment variables
 
@@ -294,7 +301,6 @@ Optional extras:
 
 ```bash
 uv sync --extra trade   # live CLOB trading (py-clob-client)
-uv sync --extra ml      # Chronos crypto prediction (torch + chronos-forecasting)
 ```
 
 ## Development

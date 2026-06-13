@@ -72,7 +72,9 @@ in-session loop** until the user stops you or the kill-switch trips.
    ROI and a real sample size, and size down or skip categories that are net
    negative. Let the track record inform selection and sizing, not a formula.
 4. **Research & form a thesis** — call the relevant research tool(s) and
-   `get_order_book(token_id)` / `get_price_history(token_id)`. Write an explicit
+   `get_order_book(token_id)` / `get_price_history(token_id)`. For a technical
+   read, call `get_market_signals(token_id)` (momentum / divergence / pullback /
+   z-score / imbalance) to inform — never gate — the thesis. Write an explicit
    fair-probability estimate and a one-paragraph thesis. Consult the category
    playbook in `references/`.
    - **Subagent accelerator (optional).** IF you can dispatch subagents (you have
@@ -85,10 +87,14 @@ in-session loop** until the user stops you or the kill-switch trips.
      winners' theses forward. If you cannot dispatch subagents (e.g. Codex),
      research inline with the same tools — the steps and the bar are identical.
      Either way the verdict is advice: YOU still own the decision.
-5. **Evaluate edge** — optionally `compute_edge(fair_prob, side, yes_price)` and
-   `suggest_size(...)`. YOU decide whether the edge clears your bar and how much
-   to stake. There is no hardcoded threshold — use judgment, and be willing to
-   skip a whole cycle.
+5. **Evaluate edge** — before sizing, optionally call
+   `calibrate_probability(fair_prob)` to shade your raw fair-prob with your OWN
+   resolved-trade track record (it returns the bucket's historical win rate, or
+   falls back to the raw value when history is thin); use the calibrated figure
+   for edge math when you trust it. Then optionally `compute_edge(fair_prob, side,
+   yes_price)` and `suggest_size(...)`. YOU decide whether the edge clears your
+   bar and how much to stake. There is no hardcoded threshold — use judgment, and
+   be willing to skip a whole cycle.
 6. **Trade** — `place_order(...)` with your `thesis`, `confidence`, `fair_prob`.
    Pass the `token_id` whose `outcome` matches the side you're buying (from
    `get_market`'s `tokens`/`outcomes` list) — settlement keys off that token. On a
@@ -115,7 +121,10 @@ in-session loop** until the user stops you or the kill-switch trips.
    lost on depends on having recorded them. Outcomes are backfilled
    automatically when the market resolves (via `reconcile_positions`).
 8. **Report** — a concise summary: markets reviewed, decisions + reasons, trades,
-   and portfolio/PnL.
+   and portfolio/PnL. When a notification channel is configured, call
+   `notify_status()` to push a periodic P&L summary (cash, realized / unrealized /
+   total PnL, open positions, mode) to Discord. (Fills, settlements, and the
+   kill-switch already auto-notify.)
 9. **Wait** — `wait_for_next_cycle(min_seconds=...)` (default 300; shorter when
    positions are near resolution), then go to step 0.
 
@@ -160,11 +169,14 @@ When a notification channel is configured, surface fills and especially
 kill-switch trips so an unattended run can reach you:
 - **Config** — set `POLYPILOT_WEBHOOK_URL` (a generic webhook) and/or
   `POLYPILOT_TELEGRAM_BOT_TOKEN` + `POLYPILOT_TELEGRAM_CHAT_ID` (Telegram).
-- **Use** — call `send_notification(...)` to push a message. The server also
-  **auto-notifies** on fills and on a breaker trip when a channel is set, so you
-  don't have to fire every routine fill yourself — but always make sure a
+- **Use** — call `send_notification(...)` to push a message, or `notify_status()`
+  at end of cycle to push a periodic P&L summary. The server also
+  **auto-notifies** on fills, on position settlements (a per-run summary from
+  `reconcile_positions`), and on a breaker trip when a channel is set, so you
+  don't have to fire every routine event yourself — but always make sure a
   kill-switch trip is announced (report it and let auto-notify/`send_notification`
-  deliver it).
+  deliver it). When the webhook is a Discord URL, messages are delivered as rich
+  embeds.
 - If no channel is configured these are no-ops; never block trading on them.
 
 ## Unattended mode
@@ -180,6 +192,9 @@ about fills and kill-switch trips.
 - **Safety & pacing**: `get_risk_status`, `wait_for_next_cycle`.
 - **Notifications**: `send_notification` — push a message to the configured
   webhook/Telegram channel (e.g. fill or kill-switch alert); no-op if unconfigured.
+  `notify_status` — push a periodic portfolio / P&L summary (cash, realized /
+  unrealized / total PnL, open positions, mode) at end of cycle; no-op if
+  unconfigured.
 - **Portfolio & memory**: `get_portfolio`, `get_positions`, `get_trade_history`,
   `reconcile_positions`, `get_similar_markets`, `record_evaluation`,
   `record_thesis`.
@@ -191,11 +206,14 @@ about fills and kill-switch trips.
   (win rate, ROI, Brier, log loss, and a 10-bucket calibration table) over your
   resolved trades; consult it to gauge and **calibrate your own confidence**
   (compare each bucket's mean predicted prob vs. actual win rate, then adjust your
-  `fair_prob` estimates if you're over/under-confident). `list_resolved_markets`
-  — recently resolved real markets with winning outcomes, to backtest/practice
-  forecasting against.
+  `fair_prob` estimates if you're over/under-confident). `calibrate_probability`
+  — shade a raw `fair_prob` with your own resolved-trade calibration (the
+  bucket's historical win rate; falls back to raw when history is thin) before
+  sizing. `list_resolved_markets` — recently resolved real markets with winning
+  outcomes, to backtest/practice forecasting against.
 - **Markets**: `list_markets`, `get_market`, `get_order_book`,
-  `get_price_history`.
+  `get_price_history`, `get_market_signals` (advisory technical reads —
+  momentum / divergence / pullback / z-score / imbalance — to inform a thesis).
 - **Research**: `get_weather_forecast`, `get_crypto`, `get_sports`,
   `get_economic_data`, `get_news`.
 - **Analytics (advisory)**: `compute_edge`, `suggest_size`.

@@ -907,6 +907,17 @@ def reconcile_positions(mode: str | None = None) -> dict:
         details.append({"position_id": pos["id"], "question": pos["question"],
                         "result": "won" if price >= 1.0 else "lost",
                         "realized_pnl": r.get("realized_pnl")})
+    # Best-effort per-run settlement summary: one "settled" notify covering all
+    # positions settled this run. No-ops when unconfigured; never affects flow.
+    if settled:
+        try:
+            won = sum(1 for d in details if d["result"] == "won")
+            lost = settled - won
+            realized = sum((d["realized_pnl"] or 0.0) for d in details)
+            notifications.notify("settled", f"{settled} position(s) settled",
+                                 won=won, lost=lost, realized_pnl=round(realized, 2))
+        except Exception:
+            pass
     # Best-effort breaker alert: if settling losses just tripped the kill-switch,
     # send a single "breaker" notify. No-ops when unconfigured; never raises.
     if settled:

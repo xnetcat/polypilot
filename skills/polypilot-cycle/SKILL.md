@@ -67,15 +67,23 @@ pass, no waiting), not the rules or who decides.
    true per-category ROI (now stake-based): lean larger where you have proven
    positive ROI with a real sample, smaller or skip where it's negative.
 4. **Research & form a thesis** — call the relevant research tool(s) plus
-   `get_order_book(token_id)` / `get_price_history(token_id)`. Write an explicit
-   fair-probability estimate and a one-paragraph thesis. Consult the category
-   playbooks in `skills/polypilot/references/`. If you have the `Task` tool, you
+   `get_order_book(token_id)` / `get_price_history(token_id)`, and optionally
+   `get_market_signals(token_id)` for a technical read (momentum / divergence /
+   pullback / z-score / imbalance) to inform — not gate — the thesis. Write an
+   explicit fair-probability estimate and a one-paragraph thesis. Consult the
+   category playbooks in `skills/polypilot/references/`. If you have the `Task`
+   tool, you
    may fan out the `polypilot-researcher` subagent in parallel over the top 3–5
    candidates (optional accelerator); otherwise research inline — the bar is
    identical.
-5. **Evaluate edge** — optionally `compute_edge(fair_prob, side, yes_price)` and
-   `suggest_size(...)`. YOU decide whether the edge clears your bar and how much to
-   stake. No hardcoded threshold; be willing to make zero trades this cycle.
+5. **Evaluate edge** — before sizing, optionally call
+   `calibrate_probability(fair_prob)` to shade your raw fair-prob with your OWN
+   resolved-trade track record (the bucket's historical win rate; falls back to
+   the raw value when history is thin) and use the calibrated figure for edge math
+   when you trust it. Then optionally `compute_edge(fair_prob, side, yes_price)`
+   and `suggest_size(...)`. YOU decide whether the edge clears your bar and how
+   much to stake. No hardcoded threshold; be willing to make zero trades this
+   cycle.
 6. **Trade** — `place_order(...)` with your `thesis`, `confidence`, `fair_prob`,
    passing the `token_id` whose `outcome` matches the side you're buying. Optional
    `polypilot-skeptic` red-team gate before sizeable trades, exactly as in the
@@ -88,7 +96,10 @@ pass, no waiting), not the rules or who decides.
    and — when you traded — the `stake_usd` you committed, so the track record and
    `get_performance_stats` ROI stay accurate. Skip logs matter as much as trades.
 8. **Report** — a concise summary: markets reviewed, decisions + reasons, trades
-   (with stakes), and portfolio/PnL. Then **STOP**. Do NOT call
+   (with stakes), and portfolio/PnL. When a notification channel is configured,
+   call `notify_status()` to push a periodic P&L summary (cash, realized /
+   unrealized / total PnL, open positions, mode) to Discord — fills, settlements,
+   and the kill-switch already auto-notify. Then **STOP**. Do NOT call
    `wait_for_next_cycle` and do NOT start another cycle — the scheduler will
    invoke the next run.
 
