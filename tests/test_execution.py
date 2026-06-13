@@ -211,3 +211,39 @@ def test_live_close_sells_via_clob(env, monkeypatch):
     # exit_price = proceeds / shares_sold = 24 / 40 = 0.60
     assert closed["exit_price"] == 0.60
     assert state.get_positions("live") == []
+
+
+class _Resp:
+    def __init__(self, status, payload):
+        self.status_code = status
+        self._payload = payload
+    def json(self):
+        return self._payload
+
+
+def test_resolved_price_open_market_returns_none(env, monkeypatch):
+    # An OPEN market must NOT settle, even at an extreme price — this is the
+    # bug the live smoke test caught (cheap price != resolved).
+    _, ex = env
+    monkeypatch.setattr(ex.httpx, "get",
+        lambda *a, **k: _Resp(200, {"closed": False,
+            "tokens": [{"token_id": "tok", "price": 0.01}]}))
+    assert ex._resolved_price("mkt", "tok") is None
+
+
+def test_resolved_price_closed_winning_token(env, monkeypatch):
+    _, ex = env
+    monkeypatch.setattr(ex.httpx, "get",
+        lambda *a, **k: _Resp(200, {"closed": True,
+            "tokens": [{"token_id": "tok", "price": 1.0},
+                       {"token_id": "other", "price": 0.0}]}))
+    assert ex._resolved_price("mkt", "tok") == 1.0
+
+
+def test_resolved_price_closed_losing_token(env, monkeypatch):
+    _, ex = env
+    monkeypatch.setattr(ex.httpx, "get",
+        lambda *a, **k: _Resp(200, {"closed": True,
+            "tokens": [{"token_id": "tok", "price": 0.0},
+                       {"token_id": "other", "price": 1.0}]}))
+    assert ex._resolved_price("mkt", "tok") == 0.0

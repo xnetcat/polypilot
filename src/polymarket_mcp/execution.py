@@ -2,6 +2,8 @@
 live mode routes through py-clob-client. Kill-switch is enforced here."""
 from __future__ import annotations
 
+import httpx
+
 from . import config, order_book, risk, state
 
 
@@ -104,19 +106,32 @@ def _live_fill(market_id, token_id, question, category, side, size_usd,
             "fill_price": fill_price, "shares": shares}
 
 
-def _resolved_price(token_id: str, side: str) -> float | None:
-    """Return 1.0 if this side won, 0.0 if it lost, None if unresolved.
-    Uses the CLOB midpoint: >0.97 => resolved YES-token-wins, <0.03 => lost."""
-    book = order_book.fetch_order_book(token_id)
-    mid = None
-    if book.get("best_bid") is not None and book.get("best_ask") is not None:
-        mid = (book["best_bid"] + book["best_ask"]) / 2
-    if mid is None:
+def _resolved_price(market_id: str, token_id: str) -> float | None:
+    """Return the resolved payout for the held token: 1.0 if it won, 0.0 if it
+    lost, or None if the market has NOT resolved yet.
+
+    Resolution is gated on the market's ``closed`` flag from the CLOB API. A
+    cheap (or expensive) price on an OPEN market is NOT a resolution — it just
+    means the market thinks the outcome is unlikely (or likely). Settling on
+    price alone would book every cheap position as an instant loss. Only once
+    the market is closed do we read the held token's final price (which settles
+    to ~0 or ~1)."""
+    try:
+        resp = httpx.get(f"{config.POLYMARKET_HOST}/markets/{market_id}", timeout=10)
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+    except Exception:
         return None
-    if mid >= 0.97:
-        return 1.0
-    if mid <= 0.03:
-        return 0.0
+    if not data.get("closed", False):
+        return None
+    for t in data.get("tokens", []):
+        if str(t.get("token_id")) == str(token_id):
+            try:
+                final = float(t.get("price", 0.5))
+            except (TypeError, ValueError):
+                return None
+            return 1.0 if final >= 0.5 else 0.0
     return None
 
 
@@ -127,7 +142,7 @@ def reconcile_positions(mode: str | None = None) -> dict:
     settled = 0
     details = []
     for pos in state.get_positions(mode, status="open"):
-        price = _resolved_price(pos["token_id"], pos["side"])
+        price = _resolved_price(pos["market_id"], pos["token_id"])
         if price is None:
             continue
         payout = pos["shares"] * price
