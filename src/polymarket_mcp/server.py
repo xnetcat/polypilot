@@ -51,10 +51,10 @@ def list_markets(limit: int = 50, category: str | None = None,
 def get_market(market_id: str) -> dict:
     """Fetch one market's full detail by condition id. Returns the market dict
     or {'error': ...} if not found."""
-    for m in _markets.fetch_active_markets(limit=200):
-        if m.condition_id == market_id:
-            return m.to_dict()
-    return {"error": f"market {market_id} not found among active markets"}
+    market = _markets.fetch_market(market_id)
+    if market is None:
+        return {"error": f"market {market_id} not found"}
+    return market.to_dict()
 
 
 @mcp.tool()
@@ -152,17 +152,20 @@ def get_news(topic: str, limit: int = 20) -> dict:
 def place_order(market_id: str, token_id: str, question: str, category: str,
                 side: str, size_usd: float, fair_prob: float | None = None,
                 confidence: float | None = None, thesis: str = "",
-                limit_price: float | None = None) -> dict:
+                limit_price: float | None = None,
+                order_type: str = "market") -> dict:
     """Buy `side` ('YES' or 'NO') on a market for size_usd. Records your thesis,
     confidence, and fair_prob with the position. Enforces the kill-switch and
     refuses if the breaker is tripped or cash is insufficient. Returns fill
     details or a rejection reason. Get token_id from get_market(): pass the
     `token_id` whose `outcome` matches the side you're buying (from get_market's
-    `tokens` list) — settlement keys off that token."""
+    `tokens` list) — settlement keys off that token. `order_type` is 'market'
+    (default; FAK in live, slippage-walked in paper) or 'limit' (GTC resting
+    order at `limit_price`)."""
     return _execution.place_order(market_id=market_id, token_id=token_id,
         question=question, category=category, side=side, size_usd=size_usd,
         fair_prob=fair_prob, confidence=confidence, thesis=thesis,
-        limit_price=limit_price)
+        limit_price=limit_price, order_type=order_type)
 
 
 @mcp.tool()
@@ -180,13 +183,68 @@ def close_position(position_id: int) -> dict:
     return _execution.close_position(position_id=position_id)
 
 
+# --- Live trading ops (read-only checks; no live trade is placed here) ---
+
+
+@mcp.tool()
+def get_live_balance() -> dict:
+    """LIVE: fetch the on-chain USDC (collateral) balance from the CLOB. Returns
+    {'balance_usd': float} or {'error': ...} when no key is set or the call
+    fails. Read-only."""
+    return _execution.get_live_balance()
+
+
+@mcp.tool()
+def sync_live_positions() -> dict:
+    """LIVE: compare on-chain positions to locally-tracked open positions and
+    REPORT the diff (on_chain_only / local_only / matched / in_sync) WITHOUT
+    mutating any state. Use to spot drift between the local ledger and the
+    chain. Read-only."""
+    return _execution.sync_live_positions()
+
+
+@mcp.tool()
+def preflight_live() -> dict:
+    """LIVE: pre-flight checklist before live trading. Returns {'ok': bool,
+    'checks': {...}} covering private key, derivable CLOB creds, positive
+    balance, and configured kill-switch limits. Never raises; placing no order."""
+    return _execution.preflight_live()
+
+
 # --- Portfolio + memory tools ---
 
 
 @mcp.tool()
 def get_portfolio() -> dict:
-    """Cash, realized/unrealized PnL, open position count, exposure, mode."""
-    return _state.get_portfolio()
+    """Cash, realized/unrealized PnL, open position count, exposure, mode.
+    Best-effort marks open positions to market (live book midpoints) to add
+    `unrealized_pnl`, `mark_to_market_value`, and `total_pnl`; if any book is
+    unavailable the unrealized keys are omitted and the base portfolio is still
+    returned. With zero open positions there is NO network call."""
+    portfolio = _state.get_portfolio()
+    positions = _state.get_positions()
+    # No open positions -> nothing to mark; skip all network entirely.
+    if not positions:
+        return portfolio
+    try:
+        mark_value = 0.0
+        cost_basis = 0.0
+        for p in positions:
+            book = _order_book.fetch_order_book(p["token_id"])
+            midpoint = book.get("midpoint")
+            if not midpoint:  # None or 0.0 (no two-sided book) -> can't mark
+                raise ValueError("no midpoint for open position")
+            mark_value += p["shares"] * midpoint
+            cost_basis += p["size_usd"]
+        unrealized = mark_value - cost_basis
+        portfolio["unrealized_pnl"] = round(unrealized, 2)
+        portfolio["mark_to_market_value"] = round(mark_value, 2)
+        portfolio["total_pnl"] = round(portfolio["realized_pnl"] + unrealized, 2)
+    except Exception:
+        # Marking is strictly best-effort: a failed/absent book must never break
+        # the call. Return the base portfolio without the unrealized keys.
+        pass
+    return portfolio
 
 
 @mcp.tool()
@@ -200,6 +258,28 @@ def get_positions(status: str = "open") -> dict:
 def get_trade_history(limit: int = 50) -> dict:
     """Recent buy/sell trades with prices and outcomes."""
     return {"trades": _state.get_trade_history(limit=limit)}
+
+
+@mcp.tool()
+def get_performance_stats(category: str | None = None) -> dict:
+    """Track-record stats from RESOLVED evaluations: win rate, total/avg PnL, and
+    ROI, broken down by category plus an overall bucket. Optionally restrict to a
+    single `category`. Use to learn which categories you trade well."""
+    return _state.get_performance_stats(category=category)
+
+
+@mcp.tool()
+def get_session_report() -> dict:
+    """One-shot summary of the current session: portfolio (with mark-to-market),
+    risk/kill-switch status, performance stats, the 10 most recent trades, and
+    the open-position count. Use for an end-of-cycle or status snapshot."""
+    return {
+        "portfolio": get_portfolio(),
+        "risk": _risk.risk_status(),
+        "performance": _state.get_performance_stats(),
+        "recent_trades": _state.get_trade_history(limit=10),
+        "open_positions": len(_state.get_positions(status="open")),
+    }
 
 
 @mcp.tool()
