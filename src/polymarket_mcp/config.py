@@ -15,6 +15,13 @@ def _float(name: str, default: float) -> float:
         return default
 
 
+def _int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
 # --- Mode ---
 _raw_mode = (os.getenv("POLYPILOT_MODE", "paper") or "paper").strip().lower()
 MODE: str = _raw_mode if _raw_mode in {"paper", "live"} else "paper"
@@ -33,7 +40,7 @@ DATA_DIR: str = os.getenv("POLYPILOT_DATA_DIR", "")
 POLYMARKET_HOST: str = os.getenv("POLYMARKET_HOST", "https://clob.polymarket.com")
 POLYMARKET_PRIVATE_KEY: str = os.getenv("POLYMARKET_PRIVATE_KEY", "")
 POLYMARKET_PROXY_ADDRESS: str = os.getenv("POLYMARKET_PROXY_ADDRESS", "")
-POLYMARKET_SIGNATURE_TYPE: int = int(os.getenv("POLYMARKET_SIGNATURE_TYPE", "0") or "0")
+POLYMARKET_SIGNATURE_TYPE: int = _int("POLYMARKET_SIGNATURE_TYPE", 0)
 HTTP_PROXY: str = os.getenv("POLYPILOT_HTTP_PROXY", "")
 GAMMA_API: str = "https://gamma-api.polymarket.com"
 

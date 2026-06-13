@@ -29,3 +29,8 @@ def test_live_mode_and_overrides(monkeypatch):
 def test_invalid_mode_falls_back_to_paper(monkeypatch):
     cfg = _reload(monkeypatch, POLYPILOT_MODE="garbage")
     assert cfg.MODE == "paper"
+
+
+def test_malformed_signature_type_falls_back_to_zero(monkeypatch):
+    cfg = _reload(monkeypatch, POLYMARKET_SIGNATURE_TYPE="bad")
+    assert cfg.POLYMARKET_SIGNATURE_TYPE == 0
