@@ -151,6 +151,30 @@ outcome label as the `side` to `place_order`.
 Paper and live use **separate SQLite database files** (`paper.db` / `live.db`),
 so paper experiments never touch live state.
 
+### Live accounting & restart reconciliation
+
+The two modes treat their local ledger differently:
+
+- **Paper** — the SQLite ledger *is* the truth. It is fully self-consistent and
+  authoritative; there is nothing on-chain to reconcile against, so paper mode
+  needs no reconciliation at all.
+- **Live** — the local ledger is only a *model* of on-chain reality (your real
+  USDC balance and ERC-1155 outcome positions). It can drift from the chain after
+  a restart or any downtime — fills that landed while the process was down, manual
+  transfers, externally-opened positions. So in live mode the local books are
+  **anchored to the chain** by a startup reconciliation:
+  `preflight_live` (verify key, creds, balance, kill-switch — STOP if not `ok`) →
+  `sync_live_balance` (true-up local cash to the real on-chain USDC) →
+  `import_live_positions` (adopt on-chain positions not tracked locally) →
+  `sync_live_positions` (report any remaining drift). **Run this after any
+  restart**, before trading.
+
+This reconciliation runs **automatically at the start of a live `/polypilot` or
+`/polypilot-cycle` session** — the skills perform it as a live-only preamble
+before any order is placed (and skip it entirely in paper mode). The kill-switch
+still halts trading at any time, and no real order is placed until `preflight_live`
+passes.
+
 ## The kill-switch (the only hard guardrail)
 
 A single cumulative-loss circuit breaker is the one rule enforced in code:
@@ -165,7 +189,7 @@ A single cumulative-loss circuit breaker is the one rule enforced in code:
 Everything else — strategy, edge bar, position sizing, concentration, and
 timing — is the agent's judgment, not hardcoded.
 
-## Tool surface (34 tools)
+## Tool surface (35 tools)
 
 Grouped by purpose. The agent calls what it needs; all tools return plain JSON.
 
@@ -191,13 +215,14 @@ Grouped by purpose. The agent calls what it needs; all tools return plain JSON.
 - `reconcile_positions` — settle open positions whose markets resolved, crediting payouts and updating realized PnL.
 - `close_position` — sell an open position now at best bid (to recycle capital from near-resolved positions, not as a stop-loss).
 
-**Live trading ops** (read-only checks — no order is placed)
-- `get_live_balance` — on-chain USDC (collateral) balance from the CLOB.
+**Live trading ops** (no order is placed; the reconciliation tools true-up local state)
+- `preflight_live` — pre-flight checklist before going live: key set, derivable CLOB creds, positive balance, kill-switch configured. Returns `{ok, checks}`; never raises. Run first at a live session start; if not `ok`, do not trade.
+- `sync_live_balance` — true-up local cash to the real on-chain USDC, correcting drift or restart staleness. Run at live startup before trading.
+- `import_live_positions` — adopt on-chain positions not yet tracked locally into local state (no cash debit, no buy logged), so live tracking survives a restart; reconciles the drift `sync_live_positions` only reports.
 - `sync_live_positions` — diff on-chain positions vs. the local ledger (`on_chain_only` / `local_only` / `matched` / `in_sync`) without mutating state.
-- `preflight_live` — pre-flight checklist before going live: key set, derivable CLOB creds, positive balance, kill-switch configured. Returns `{ok, checks}`; never raises.
+- `get_live_balance` — on-chain USDC (collateral) balance from the CLOB. Read-only.
 - `get_open_orders` — list your resting (unfilled/partially-filled) limit orders on the CLOB; `{orders: [...]}` or `{error}` with no key. Never raises.
 - `cancel_order` — cancel a single resting order by id (ids from `get_open_orders`); `{status: cancelled, order_id}` or `{status: error, reason}`. Never raises.
-- `import_live_positions` — adopt on-chain positions not yet tracked locally into local state (no cash debit, no buy logged), so live tracking survives a restart; reconciles the drift `sync_live_positions` only reports.
 
 **Backtesting / calibration**
 - `get_scorecard` — decision-quality scorecard over your resolved trades (win rate, ROI, Brier score, log loss, and a 10-bucket calibration table), overall and per category; consult it to calibrate your own confidence.

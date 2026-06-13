@@ -23,8 +23,35 @@ in-session loop** until the user stops you or the kill-switch trips.
 1. Call `get_risk_status()`. Report mode, cash, and kill-switch limits.
 2. If mode is `live`, print a clear one-time banner: "⚠️ LIVE MODE — real money.
    Kill-switch at $X daily / $Y total." and proceed (do not ask per trade).
+3. **Live startup reconciliation (LIVE ONLY — run before any trading).** If
+   `get_risk_status()` reports `mode == "live"`, the local SQLite books (cash and
+   positions) are only a *model* of on-chain reality and can drift after a restart
+   or any downtime. Anchor them to the chain BEFORE you place a single order, in
+   this order:
+   1. `preflight_live()` — confirm the private key, derivable CLOB creds, a
+      positive balance, and the kill-switch are all OK. If it does **not** return
+      `ok: true`, report what failed and **STOP — do not trade.** No real order is
+      placed until preflight passes.
+   2. `sync_live_balance()` — true-up local cash to the real on-chain USDC,
+      correcting any drift or restart staleness.
+   3. `import_live_positions()` — adopt any on-chain positions not yet tracked
+      locally into local state.
+   4. `sync_live_positions()` — report any remaining drift between the chain and
+      the local books.
+   In plain terms: this makes your local books match your actual wallet after any
+   restart or gap, before the bot trades. **Paper mode SKIPS this entirely** — the
+   paper ledger is self-consistent and authoritative, so none of these tools apply.
+   The kill-switch still halts the loop at any time regardless.
 
 ## The cycle (repeat until stopped)
+> **Live-only preamble.** On the FIRST cycle of a live session you will already
+> have run the Live startup reconciliation above. If a live session has been
+> idle or the process was restarted between cycles, re-run that reconciliation
+> (`preflight_live` → `sync_live_balance` → `import_live_positions` →
+> `sync_live_positions`) before resuming trades so the local books still match
+> the wallet. In paper mode skip this — the ledger is authoritative. As always,
+> a tripped kill-switch halts the loop and no real order is placed until
+> `preflight_live` returns `ok`.
 0. **Safety** — `get_risk_status()`. If `breaker_tripped`, STOP and report.
 1. **Reconcile & review** — `reconcile_positions()`. Then `get_positions()`. For
    each open position, re-fetch its research (e.g. `get_weather_forecast`) and
@@ -173,18 +200,22 @@ about fills and kill-switch trips.
 - **Analytics (advisory)**: `compute_edge`, `suggest_size`.
 - **Execution**: `place_order` (use `order_type='market'` (default) or `'limit'`
   with a `limit_price` for a resting GTC order), `close_position`.
-- **Live trading ops (read-only checks; place no order)**:
-  - `get_live_balance` — on-chain USDC collateral balance from the CLOB.
-  - `sync_live_positions` — diff on-chain vs locally-tracked positions to spot
-    drift (reports `in_sync` only when the chain was actually readable).
+- **Live trading ops (place no order; some true-up local state)**:
   - `preflight_live` — pre-flight checklist (key set, CLOB creds, positive
-    balance, kill-switch configured) before any live trading.
-  - `get_open_orders` — list your resting (unfilled) limit orders on the CLOB.
-  - `cancel_order` — cancel a single resting order by id (ids from
-    `get_open_orders`).
+    balance, kill-switch configured) before any live trading. Run first at a live
+    session start; if not `ok`, STOP.
+  - `sync_live_balance` — anchor local cash to the real on-chain USDC, correcting
+    any drift or restart staleness. Run at live startup before trading.
   - `import_live_positions` — adopt on-chain positions not yet tracked locally
     into local state (so live tracking survives a restart); reconciles the drift
     that `sync_live_positions` only reports.
+  - `sync_live_positions` — diff on-chain vs locally-tracked positions to spot
+    drift (reports `in_sync` only when the chain was actually readable). Read-only.
+  - `get_live_balance` — on-chain USDC collateral balance from the CLOB.
+    Read-only.
+  - `get_open_orders` — list your resting (unfilled) limit orders on the CLOB.
+  - `cancel_order` — cancel a single resting order by id (ids from
+    `get_open_orders`).
 
 ## Subagents (optional, when available)
 Auto-discovered from the plugin's `agents/` directory; usable only by clients

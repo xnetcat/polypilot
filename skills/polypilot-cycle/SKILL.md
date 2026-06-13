@@ -31,6 +31,23 @@ pass, no waiting), not the rules or who decides.
 0. **Safety** — `get_risk_status()`. Note the mode and kill-switch limits. If
    `breaker_tripped: true`, send a kill-switch notification (`send_notification`,
    when configured), report, and **exit now** — do not continue.
+0a. **Live startup reconciliation (LIVE ONLY — before any trading).** If
+   `get_risk_status()` reports `mode == "live"`, the local SQLite books (cash and
+   positions) are only a *model* of on-chain reality and drift after a restart or
+   gap — and a scheduled run almost always starts a fresh process, so assume
+   drift. Anchor the books to the chain BEFORE placing any order, in this order:
+   1. `preflight_live()` — confirm the private key, derivable CLOB creds, a
+      positive balance, and the kill-switch are all OK. If it does **not** return
+      `ok: true`, report what failed and **STOP this cycle — do not trade.** No
+      real order is placed until preflight passes.
+   2. `sync_live_balance()` — true-up local cash to the real on-chain USDC,
+      correcting drift / restart staleness.
+   3. `import_live_positions()` — adopt any on-chain positions not tracked locally.
+   4. `sync_live_positions()` — report any remaining chain-vs-local drift.
+   This makes the local books match the actual wallet after the restart before the
+   bot trades. **Paper mode SKIPS this entirely** — the paper ledger is
+   self-consistent and authoritative, so none of these tools apply. The
+   kill-switch still halts the run at any time.
 1. **Reconcile & review** — `reconcile_positions()`, then `get_positions()`. For
    each open position, re-fetch its research (e.g. `get_weather_forecast`,
    `get_crypto`, `get_sports`) and compare to the stored thesis. Apply the exit
