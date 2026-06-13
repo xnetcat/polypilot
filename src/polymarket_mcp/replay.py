@@ -39,6 +39,10 @@ _P_CEIL = 1.0 - 1e-6
 # Number of calibration buckets: deciles over [0, 1].
 _N_BUCKETS = 10
 
+# Minimum resolved trades in a decile bucket before we trust its empirical win
+# rate enough to calibrate toward it. Below this we fall back to the raw prob.
+_MIN_CALIBRATION_SAMPLES = 5
+
 
 def _chosen_side_prob(decision: str, fair_prob: float) -> float:
     """Predicted probability that the CHOSEN side wins.
@@ -244,6 +248,88 @@ def scorecard(mode: str | None = None) -> dict:
         "overall": _finalize(overall) if overall["count"]
         else _empty_scorecard_bucket(),
         "by_category": {c: _finalize(b) for c, b in by_cat.items()},
+    }
+
+
+def _clamp01(x: float) -> float:
+    """Clamp a probability into [0, 1]."""
+    return max(0.0, min(1.0, x))
+
+
+def calibrate_probability(fair_prob: float, mode: str | None = None) -> dict:
+    """Calibrate a model probability against the agent's own resolved track record.
+
+    Looks at every RESOLVED ``market_intelligence`` row that was an actual trade
+    (``decision`` in ``{"buy_yes", "buy_no"}``, ``resolved=1``, ``pnl`` not null)
+    and, for each, the predicted probability that its CHOSEN side won
+    (``fair_prob`` for ``buy_yes``, ``1 - fair_prob`` for ``buy_no``). It buckets
+    those predictions into the same deciles as :func:`scorecard`'s calibration
+    table, finds the bucket that ``fair_prob`` itself falls in, and reports the
+    historical actual win rate (``pnl > 0``) of past predictions in that bucket
+    as the ``calibrated`` probability.
+
+    Min-sample guard: if the bucket has fewer than ``_MIN_CALIBRATION_SAMPLES``
+    (5) resolved trades — including an empty DB — there is too little history to
+    trust, so ``calibrated`` equals ``raw`` and the note explains the fallback.
+    At or above the threshold we calibrate fully to the bucket's empirical win
+    rate. Never raises and never divides by zero; a non-finite or out-of-range
+    ``fair_prob`` is clamped to [0, 1] first.
+
+    Returns a JSON-serializable dict::
+
+        {"raw": <input>, "calibrated": <float>, "samples": <int>, "note": <str>}
+    """
+    try:
+        raw = float(fair_prob)
+    except (TypeError, ValueError):
+        raw = 0.0
+    # Reject NaN/inf BEFORE clamping (min/max on NaN is undefined), then clamp.
+    raw = _clamp01(raw) if math.isfinite(raw) else 0.0
+
+    target_bucket = _bucket_index(raw)
+
+    placeholders = ",".join("?" for _ in TRADE_DECISIONS)
+    conn = db.connect(mode or config.MODE)
+    try:
+        rows = conn.execute(
+            "SELECT decision, fair_prob, pnl "
+            "FROM market_intelligence "
+            "WHERE resolved=1 AND pnl IS NOT NULL AND fair_prob IS NOT NULL "
+            f"AND decision IN ({placeholders})",
+            TRADE_DECISIONS,
+        ).fetchall()
+    finally:
+        conn.close()
+
+    # Tally wins/total of past predictions whose chosen-side prob shares a decile
+    # with the input. ``_bucket_index`` clamps, so no overflow on edge probs.
+    bucket_total = 0
+    bucket_wins = 0
+    for r in rows:
+        pred = _chosen_side_prob(r["decision"], r["fair_prob"])
+        if _bucket_index(pred) != target_bucket:
+            continue
+        bucket_total += 1
+        if r["pnl"] > 0:
+            bucket_wins += 1
+
+    if bucket_total < _MIN_CALIBRATION_SAMPLES:
+        return {
+            "raw": raw,
+            "calibrated": raw,
+            "samples": bucket_total,
+            "note": "insufficient history (n<5) — using raw",
+        }
+
+    empirical = bucket_wins / bucket_total  # bucket_total >= 5, no div-by-zero
+    return {
+        "raw": raw,
+        "calibrated": _clamp01(empirical),
+        "samples": bucket_total,
+        "note": (
+            f"calibrated to bucket win rate {empirical:.2%} "
+            f"over {bucket_total} resolved trades"
+        ),
     }
 
 
