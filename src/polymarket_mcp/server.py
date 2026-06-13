@@ -162,14 +162,16 @@ def place_order(market_id: str, token_id: str, question: str, category: str,
                 confidence: float | None = None, thesis: str = "",
                 limit_price: float | None = None,
                 order_type: str = "market") -> dict:
-    """Buy `side` ('YES' or 'NO') on a market for size_usd. Records your thesis,
-    confidence, and fair_prob with the position. Enforces the kill-switch and
-    refuses if the breaker is tripped or cash is insufficient. Returns fill
-    details or a rejection reason. Get token_id from get_market(): pass the
-    `token_id` whose `outcome` matches the side you're buying (from get_market's
-    `tokens` list) — settlement keys off that token. `order_type` is 'market'
-    (default; FAK in live, slippage-walked in paper) or 'limit' (GTC resting
-    order at `limit_price`)."""
+    """Buy `side` on a market for size_usd. For BINARY markets `side` is 'YES' or
+    'NO'; for MULTI-OUTCOME markets (is_binary=false) `side` is the outcome label
+    (e.g. "Lakers") whose token you're buying. Records your thesis, confidence,
+    and fair_prob with the position. Enforces the kill-switch and refuses if the
+    breaker is tripped, cash is insufficient, or you already hold an open
+    position in this market. Returns fill details or a rejection reason. Get
+    token_id from get_market(): pass the `token_id` whose `outcome` matches the
+    side you're buying (from get_market's `outcomes`/`tokens` list) — settlement
+    keys off that token. `order_type` is 'market' (default; FAK in live,
+    slippage-walked in paper) or 'limit' (GTC resting order at `limit_price`)."""
     return _execution.place_order(market_id=market_id, token_id=token_id,
         question=question, category=category, side=side, size_usd=size_usd,
         fair_prob=fair_prob, confidence=confidence, thesis=thesis,

@@ -263,7 +263,9 @@ def _fetch_from_clob(limit: int) -> list[Market]:
             condition_id = m.get("condition_id", m.get("id", ""))
             question = (m.get("question", "") or "").strip()
             volume = float(m.get("volume", 0) or 0)
-            if not condition_id or not question or not _has_usable_tokens(token_list):
+            # Match the Gamma path: prune zero-volume / missing-id / non-usable
+            # markets in this CLOB fallback too.
+            if not condition_id or not question or volume == 0 or not _has_usable_tokens(token_list):
                 continue
 
             markets.append(Market(

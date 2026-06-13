@@ -55,6 +55,13 @@ def place_order(*, mode: str | None = None, market_id: str, token_id: str,
     elif size_usd > cash:
         return {"status": "rejected", "reason": f"insufficient cash ${cash:.2f}"}
 
+    # One open position per market (matches the DB's partial unique index).
+    # Pre-check so a duplicate returns a clean rejection instead of an opaque
+    # IntegrityError bubbling out of the open-position INSERT.
+    if any(p["market_id"] == market_id for p in state.get_positions(mode, "open")):
+        return {"status": "rejected",
+                "reason": f"already hold an open position in market {market_id}"}
+
     # Closed-market guard: refuse to open into an already-resolved market.
     # LIVE-ONLY: the guard does a live status fetch, so gating it to live mode
     # keeps paper-mode (simulation) hermetic — paper candidates already come
@@ -579,8 +586,12 @@ def reconcile_positions(mode: str | None = None) -> dict:
         # Best-effort: backfill the matching logged evaluation's outcome so the
         # track record reflects how this market resolved. A missing intelligence
         # row (returns False) must not break reconciliation.
-        outcome_side = pos["side"] if price >= 1.0 else (
-            "NO" if pos["side"] == "YES" else "YES")
+        if price >= 1.0:
+            outcome_side = pos["side"]              # the held outcome won
+        elif pos["side"] in ("YES", "NO"):
+            outcome_side = "NO" if pos["side"] == "YES" else "YES"
+        else:
+            outcome_side = ""                       # multi-outcome loss: winner unknown
         state.update_evaluation_outcome(mode, pos["market_id"],
             outcome_side=outcome_side, resolution_price=price,
             pnl=r.get("realized_pnl"))
