@@ -157,14 +157,13 @@ def _normalize_team_name(name: str, *, strip_article: bool = True) -> str:
 def _extract_teams_from_question(question: str) -> tuple[str, str] | None:
     """Extract two team names from a sports question. Handles 'vs', 'beat', etc.
 
-    Extracted names are run through ``_normalize_team_name`` to strip trailing
-    time/filler noise ("tonight", "game", ...) and surrounding punctuation that
-    hurts ESPN matching, while leaving clean "Team A vs Team B" names intact.
-    The leading article is preserved in the returned display name; it is
-    stripped only for the ESPN match keys (see ``_get_espn_score_data``).
+    Extracted names are run through ``_normalize_team_name`` to strip a leading
+    article ("the Lakers" -> "Lakers"), trailing time/filler noise ("tonight",
+    "game", ...), and surrounding punctuation that hurts ESPN matching, while
+    leaving clean "Team A vs Team B" names intact.
     """
     def _norm(value: str) -> str:
-        return _normalize_team_name(value, strip_article=False)
+        return _normalize_team_name(value, strip_article=True)
 
     vs_match = re.search(r"(.+?)\s+vs\.?\s+(.+?)(?::|$|\?)", question)
     if vs_match:

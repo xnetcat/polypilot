@@ -187,7 +187,7 @@ def test_sports_extract_teams_vs():
 
 def test_sports_extract_teams_beat():
     teams = sports._extract_teams_from_question("Will the Lakers beat the Celtics?")
-    assert teams == ("the Lakers", "the Celtics")
+    assert teams == ("Lakers", "Celtics")
 
 
 # --------------------------------------------------------------------------- #

@@ -21,8 +21,8 @@ def test_fetch_sports_parses_event(monkeypatch):
     result = sports.fetch_sports("Will the Lakers beat the Celtics?")
     assert "sport" in result
     assert result.get("error") is None or "team1" in result
-    assert result["team1"] == "the Lakers"
-    assert result["team2"] == "the Celtics"
+    assert result["team1"] == "Lakers"
+    assert result["team2"] == "Celtics"
     assert result["sport"] == "basketball/nba"
 
 
