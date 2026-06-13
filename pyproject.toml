@@ -27,3 +27,6 @@ packages = ["src/polymarket_mcp"]
 
 [dependency-groups]
 dev = ["pytest>=8.0.0", "respx>=0.21.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
