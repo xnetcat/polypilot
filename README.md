@@ -175,6 +175,15 @@ before any order is placed (and skip it entirely in paper mode). The kill-switch
 still halts trading at any time, and no real order is placed until `preflight_live`
 passes.
 
+In live mode, **`get_live_account` is the authoritative account view** — it pulls
+the real USDC balance and open positions directly from Polymarket, marks each
+position at its live order-book midpoint, and returns balance, positions, equity,
+total position value, and unrealized PnL from chain truth rather than the local
+model. Trust it over the modeled local cash/positions when the two diverge.
+**Realized PnL, however, is still derived locally** (from the SQLite trade
+ledger): Polymarket exposes no direct realized-PnL endpoint, so realized PnL —
+and the kill-switch that keys off it — remains a locally-computed figure.
+
 ## The kill-switch (the only hard guardrail)
 
 A single cumulative-loss circuit breaker is the one rule enforced in code:
@@ -189,7 +198,7 @@ A single cumulative-loss circuit breaker is the one rule enforced in code:
 Everything else — strategy, edge bar, position sizing, concentration, and
 timing — is the agent's judgment, not hardcoded.
 
-## Tool surface (35 tools)
+## Tool surface (36 tools)
 
 Grouped by purpose. The agent calls what it needs; all tools return plain JSON.
 
@@ -220,6 +229,7 @@ Grouped by purpose. The agent calls what it needs; all tools return plain JSON.
 - `sync_live_balance` — true-up local cash to the real on-chain USDC, correcting drift or restart staleness. Run at live startup before trading.
 - `import_live_positions` — adopt on-chain positions not yet tracked locally into local state (no cash debit, no buy logged), so live tracking survives a restart; reconciles the drift `sync_live_positions` only reports.
 - `sync_live_positions` — diff on-chain positions vs. the local ledger (`on_chain_only` / `local_only` / `matched` / `in_sync`) without mutating state.
+- `get_live_account` — **authoritative** Polymarket-sourced account snapshot: real USDC balance, real positions marked at live midpoints, and the resulting equity, total position value, and unrealized PnL (`{source, balance_usd, equity, total_position_value, total_cost, unrealized_pnl, positions, marked, unmarked}`). Trust this over the modeled local cash/positions in live mode. Read-only; never raises.
 - `get_live_balance` — on-chain USDC (collateral) balance from the CLOB. Read-only.
 - `get_open_orders` — list your resting (unfilled/partially-filled) limit orders on the CLOB; `{orders: [...]}` or `{error}` with no key. Never raises.
 - `cancel_order` — cancel a single resting order by id (ids from `get_open_orders`); `{status: cancelled, order_id}` or `{status: error, reason}`. Never raises.

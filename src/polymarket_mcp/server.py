@@ -21,6 +21,25 @@ from .research import weather as _weather
 mcp = FastMCP("polypilot")
 
 
+def _attach_live_balance(view: dict) -> None:
+    """Best-effort: in LIVE mode, add the real on-chain USDC as `live_balance_usd`
+    so the modeled cash can be compared against chain truth. Hermetic by design:
+    only runs when the view's `mode == "live"`, and `get_live_balance` returns an
+    error dict WITHOUT any network when no key is set, so the common (paper /
+    no-key) path adds no network and no key. On any error the balance is omitted
+    (left absent); never raises."""
+    try:
+        if view.get("mode") != "live":
+            return
+        bal = _execution.get_live_balance()
+        if isinstance(bal, dict) and not bal.get("error"):
+            balance_usd = bal.get("balance_usd")
+            if isinstance(balance_usd, (int, float)):
+                view["live_balance_usd"] = balance_usd
+    except Exception:
+        pass
+
+
 @mcp.tool()
 def ping() -> dict:
     """Health check. Returns service status."""
@@ -109,8 +128,12 @@ def suggest_size(edge: float, bankroll: float, kelly_fraction: float = 0.5) -> d
 def get_risk_status() -> dict:
     """Current safety state: cash, realized PnL (total + today), open exposure,
     kill-switch limits, and whether the breaker is tripped. Call this FIRST each
-    cycle — if breaker_tripped is true, STOP trading and report."""
-    return _risk.risk_status()
+    cycle — if breaker_tripped is true, STOP trading and report. In LIVE mode it
+    also best-effort adds `live_balance_usd` (the real on-chain USDC) so any
+    divergence from the modeled cash is visible."""
+    status = _risk.risk_status()
+    _attach_live_balance(status)
+    return status
 
 
 # --- Research tools ---
@@ -198,11 +221,36 @@ def close_position(position_id: int) -> dict:
 
 
 @mcp.tool()
+def get_live_account() -> dict:
+    """LIVE: authoritative account snapshot — balance, positions, equity, and
+    unrealized PnL — pulled directly from Polymarket (the source of truth in live
+    mode). Reads the on-chain USDC balance and the real open positions, marks
+    each position at its live order-book midpoint, and returns {'source':
+    'polymarket', 'balance_usd', 'equity', 'total_position_value', 'total_cost',
+    'unrealized_pnl', 'positions': [...], 'marked', 'unmarked'} — or an
+    error/unavailable shape when no key is set or the balance can't be read.
+    Trust THIS over the modeled local cash/positions in live mode. Realized PnL
+    is still derived locally (Polymarket exposes no realized-PnL endpoint). Never
+    raises. Read-only."""
+    return _execution.get_live_account()
+
+
+@mcp.tool()
 def get_live_balance() -> dict:
     """LIVE: fetch the on-chain USDC (collateral) balance from the CLOB. Returns
     {'balance_usd': float} or {'error': ...} when no key is set or the call
     fails. Read-only."""
     return _execution.get_live_balance()
+
+
+@mcp.tool()
+def sync_live_balance() -> dict:
+    """LIVE: anchor the local cash ledger to the REAL on-chain USDC balance. Run
+    at live startup / after a restart to correct drift between the modeled cash
+    and the wallet. Returns {'status': 'synced', 'cash', 'set_starting'} or an
+    error/unavailable shape when no key is set or the balance can't be read.
+    Never raises."""
+    return _execution.sync_live_balance()
 
 
 @mcp.tool()
@@ -265,8 +313,11 @@ def get_portfolio() -> dict:
     there is NO network call."""
     portfolio = _state.get_portfolio()
     positions = _state.get_positions()
-    # No open positions -> nothing to mark; skip all network entirely.
+    # No open positions -> nothing to mark; skip all position-marking network.
+    # Still best-effort surface the real on-chain balance in live mode so a
+    # flat-but-live account shows chain truth next to the modeled cash.
     if not positions:
+        _attach_live_balance(portfolio)
         return portfolio
     mark_value = 0.0
     cost_basis = 0.0
@@ -290,6 +341,8 @@ def get_portfolio() -> dict:
         portfolio["mark_to_market_value"] = round(mark_value, 2)
         portfolio["total_pnl"] = round(portfolio["realized_pnl"] + unrealized, 2)
         portfolio["marked_positions"] = marked
+    # Best-effort: in live mode add the real on-chain USDC alongside modeled cash.
+    _attach_live_balance(portfolio)
     return portfolio
 
 

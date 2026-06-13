@@ -340,6 +340,114 @@ def get_live_balance() -> dict:
         return {"error": f"{type(e).__name__}: {e}", "balance_usd": None}
 
 
+def get_live_account() -> dict:
+    """Authoritative LIVE account snapshot pulled FROM POLYMARKET (not the local
+    model). Best-effort: never raises.
+
+    Reads the real on-chain USDC balance (``get_live_balance``) and the real
+    open positions (``get_live_positions``), then marks each position at the
+    LIVE order-book midpoint (``order_book.fetch_order_book``) to compute its
+    ``current_price``, ``market_value`` (= shares * mid) and ``unrealized_pnl``
+    (= market_value - cost). Marking is PER-POSITION best-effort: a position
+    whose book/midpoint is unavailable is still INCLUDED (with null
+    market_value/unrealized) and counted as ``unmarked`` rather than aborting
+    the whole snapshot.
+
+    Returns one of:
+      * ``{"status": "error", "reason": ...}`` — no private key.
+      * ``{"status": "unavailable"/"error", "reason": ...}`` — the balance could
+        not be read.
+      * ``{"source": "polymarket", "balance_usd": float, "equity": float,
+        "total_position_value": float, "total_cost": float,
+        "unrealized_pnl": float, "positions": [...], "marked": n,
+        "unmarked": m}`` — where ``equity = balance_usd + total_position_value``
+        and the aggregates sum only the MARKED positions.
+
+    Realized PnL is intentionally NOT part of this view: Polymarket exposes no
+    direct realized-PnL endpoint, so realized PnL stays a locally-derived figure
+    (see the modeled portfolio / risk status)."""
+    if not config.POLYMARKET_PRIVATE_KEY:
+        return {"status": "error", "reason": "POLYMARKET_PRIVATE_KEY not set"}
+
+    # Real on-chain cash. If the balance can't be read, the snapshot is not
+    # trustworthy — surface that rather than reporting a misleading $0 account.
+    try:
+        bal = get_live_balance()
+    except Exception as e:  # get_live_balance is guarded, but be defensive.
+        return {"status": "error", "reason": f"{type(e).__name__}: {e}"}
+    if not isinstance(bal, dict):
+        return {"status": "unavailable", "reason": "balance read returned no value"}
+    if bal.get("error"):
+        return {"status": "error", "reason": bal["error"]}
+    balance_usd = bal.get("balance_usd")
+    if not isinstance(balance_usd, (int, float)):
+        return {"status": "unavailable",
+                "reason": "balance read returned no numeric balance_usd"}
+
+    # Real on-chain positions (empty list on no-key/error — by this point a key
+    # is set, so an empty list here means a genuinely flat account or a swallowed
+    # fetch error; either way we proceed with whatever positions we got).
+    try:
+        raw_positions = get_live_positions()
+    except Exception:
+        raw_positions = []
+
+    positions = []
+    total_cost = 0.0
+    total_position_value = 0.0
+    unrealized_pnl = 0.0
+    marked = 0
+    unmarked = 0
+    for p in raw_positions:
+        shares = p.get("shares") or 0.0
+        cost = p.get("cost") or 0.0
+        asset_id = p.get("asset_id", "")
+        entry = {
+            "market_id": p.get("market_id", ""),
+            "outcome": p.get("outcome", ""),
+            "shares": shares,
+            "avg_price": p.get("avg_price"),
+            "cost": cost,
+            "asset_id": asset_id,
+            "current_price": None,
+            "market_value": None,
+            "unrealized_pnl": None,
+        }
+        # Per-position best-effort mark at the live midpoint.
+        midpoint = None
+        if asset_id:
+            try:
+                book = order_book.fetch_order_book(asset_id)
+                midpoint = book.get("midpoint")
+            except Exception:
+                midpoint = None
+        if midpoint:  # None or 0.0 (no two-sided book) -> can't mark; leave null
+            market_value = shares * midpoint
+            pos_unrealized = market_value - cost
+            entry["current_price"] = round(midpoint, 4)
+            entry["market_value"] = round(market_value, 2)
+            entry["unrealized_pnl"] = round(pos_unrealized, 2)
+            total_position_value += market_value
+            unrealized_pnl += pos_unrealized
+            marked += 1
+        else:
+            unmarked += 1
+        total_cost += cost
+        positions.append(entry)
+
+    return {
+        "source": "polymarket",
+        "balance_usd": round(balance_usd, 2),
+        "equity": round(balance_usd + total_position_value, 2),
+        "total_position_value": round(total_position_value, 2),
+        "total_cost": round(total_cost, 2),
+        "unrealized_pnl": round(unrealized_pnl, 2),
+        "positions": positions,
+        "marked": marked,
+        "unmarked": unmarked,
+    }
+
+
 def sync_live_balance(mode: str = "live") -> dict:
     """Anchor LIVE local cash to the REAL on-chain USDC balance. Best-effort:
     never raises.

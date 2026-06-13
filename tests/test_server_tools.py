@@ -34,7 +34,9 @@ EXPECTED_TOOLS = {
     "record_evaluation",
     "get_performance_stats",
     "get_session_report",
+    "get_live_account",
     "get_live_balance",
+    "sync_live_balance",
     "sync_live_positions",
     "preflight_live",
     "get_open_orders",
@@ -67,11 +69,11 @@ def _registered_tool_names(server) -> set[str]:
 
 
 def test_registered_tool_set_is_exactly_expected(srv):
-    """The server must register exactly the 34 expected tools — no more, no
+    """The server must register exactly the 36 expected tools — no more, no
     fewer. A drifted set (renamed/added/removed tool) fails here."""
     names = _registered_tool_names(srv)
     assert names == EXPECTED_TOOLS
-    assert len(names) == 34
+    assert len(names) == 36
 
 
 def test_every_tool_resolves_to_callable_attribute(srv):

@@ -419,3 +419,54 @@ def test_import_live_positions_no_key_error(srv, monkeypatch):
     assert "error" in out
     assert out["adopted"] == 0
     assert out["skipped"] == 0
+
+
+def test_get_live_account_no_key_error(srv, monkeypatch):
+    # No private key -> error shape, never a raise, and no network call (the
+    # snapshot bails on the key check before reading balance/positions).
+    monkeypatch.setattr(srv._execution.config, "POLYMARKET_PRIVATE_KEY", "")
+    monkeypatch.setattr(srv._execution, "_get_clob_client",
+        lambda: pytest.fail("no clob client expected with no key"))
+    monkeypatch.setattr(srv._order_book, "fetch_order_book",
+        lambda tid: pytest.fail("no order book fetch expected with no key"))
+    out = srv.get_live_account()
+    assert out["status"] == "error"
+    assert "PRIVATE_KEY" in out["reason"]
+    assert "balance_usd" not in out
+    assert "positions" not in out
+
+
+def test_sync_live_balance_no_key_error(srv, monkeypatch):
+    # No private key -> error shape, never a raise, and no network call.
+    monkeypatch.setattr(srv._execution.config, "POLYMARKET_PRIVATE_KEY", "")
+    monkeypatch.setattr(srv._execution, "_get_clob_client",
+        lambda: pytest.fail("no clob client expected with no key"))
+    out = srv.sync_live_balance()
+    assert out["status"] == "error"
+    assert "PRIVATE_KEY" in out["reason"]
+
+
+# --------------------------------------------------------------------------- #
+# Live-balance enrichment of the safety views is hermetic in paper/no-key env
+# --------------------------------------------------------------------------- #
+def test_get_risk_status_no_live_balance_in_paper(srv, monkeypatch):
+    # Default fixture env is paper + no key: get_risk_status must NOT gain a
+    # live_balance_usd, must make NO network call, and must never raise.
+    monkeypatch.setattr(srv._execution, "_get_clob_client",
+        lambda: pytest.fail("no clob client expected in paper/no-key env"))
+    out = srv.get_risk_status()
+    assert out["mode"] == "paper"
+    assert "live_balance_usd" not in out
+    assert out["breaker_tripped"] is False
+
+
+def test_get_portfolio_no_live_balance_in_paper(srv, monkeypatch):
+    # Paper + no key: get_portfolio must NOT add live_balance_usd and must make
+    # NO live-balance network call (zero positions already skips marking).
+    monkeypatch.setattr(srv._execution, "_get_clob_client",
+        lambda: pytest.fail("no clob client expected in paper/no-key env"))
+    monkeypatch.setattr(srv._order_book, "fetch_order_book",
+        lambda tid: pytest.fail("no network call expected in paper/no-key env"))
+    out = srv.get_portfolio()
+    assert out["cash"] == 100.0
+    assert "live_balance_usd" not in out

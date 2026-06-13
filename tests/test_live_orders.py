@@ -342,3 +342,124 @@ def test_import_live_positions_empty_chain(env, monkeypatch):
     assert res["adopted"] == 0
     assert res["skipped"] == 0
     assert state.get_positions("live", status="open") == []
+
+
+# --------------------------------------------------------------------------- #
+# get_live_account — authoritative Polymarket-sourced snapshot
+# --------------------------------------------------------------------------- #
+def test_get_live_account_no_key(env, monkeypatch):
+    _, ex = env
+    monkeypatch.setattr(ex.config, "POLYMARKET_PRIVATE_KEY", "")
+    res = ex.get_live_account()
+    assert res["status"] == "error"
+    assert "PRIVATE_KEY" in res["reason"]
+
+
+def test_get_live_account_marks_positions_and_aggregates(env, monkeypatch):
+    # All network mocked: a real balance, two on-chain positions (both markable),
+    # and live midpoints. equity = balance + Σ(shares*mid); unrealized =
+    # Σ(mkt_value - cost).
+    _, ex = env
+    monkeypatch.setattr(ex.config, "POLYMARKET_PRIVATE_KEY", "0xkey")
+    monkeypatch.setattr(ex, "get_live_balance", lambda: {"balance_usd": 250.0})
+    monkeypatch.setattr(ex, "get_live_positions", lambda: [
+        {"market_id": "M1", "outcome": "Yes", "shares": 40.0, "avg_price": 0.50,
+         "cost": 20.0, "asset_id": "tokA"},
+        {"market_id": "M2", "outcome": "No", "shares": 20.0, "avg_price": 0.30,
+         "cost": 6.0, "asset_id": "tokB"},
+    ])
+    mids = {"tokA": 0.60, "tokB": 0.25}
+    monkeypatch.setattr(ex.order_book, "fetch_order_book",
+        lambda tid: {"midpoint": mids[tid]})
+
+    res = ex.get_live_account()
+    assert res["source"] == "polymarket"
+    assert res["balance_usd"] == 250.0
+    # Position values: 40*0.60 = 24.0 ; 20*0.25 = 5.0 -> total 29.0.
+    assert res["total_position_value"] == 29.0
+    assert res["total_cost"] == 26.0  # 20 + 6
+    # Unrealized: (24-20) + (5-6) = 4 + (-1) = 3.0.
+    assert res["unrealized_pnl"] == 3.0
+    # Equity = balance + marked position value.
+    assert res["equity"] == 279.0  # 250 + 29
+    assert res["marked"] == 2
+    assert res["unmarked"] == 0
+    # Per-position marking is reflected in each entry.
+    p1 = next(p for p in res["positions"] if p["market_id"] == "M1")
+    assert p1["current_price"] == 0.60
+    assert p1["market_value"] == 24.0
+    assert p1["unrealized_pnl"] == 4.0
+
+
+def test_get_live_account_unmarked_position_best_effort(env, monkeypatch):
+    # One markable position, one with no usable midpoint: the unmarked one is
+    # still INCLUDED (null marks) and counted, not fatal; aggregates use only the
+    # marked one.
+    _, ex = env
+    monkeypatch.setattr(ex.config, "POLYMARKET_PRIVATE_KEY", "0xkey")
+    monkeypatch.setattr(ex, "get_live_balance", lambda: {"balance_usd": 100.0})
+    monkeypatch.setattr(ex, "get_live_positions", lambda: [
+        {"market_id": "GOOD", "outcome": "Yes", "shares": 10.0, "avg_price": 0.40,
+         "cost": 4.0, "asset_id": "tokG"},
+        {"market_id": "BAD", "outcome": "Yes", "shares": 50.0, "avg_price": 0.20,
+         "cost": 10.0, "asset_id": "tokX"},
+    ])
+
+    def fake_book(tid):
+        if tid == "tokG":
+            return {"midpoint": 0.50}
+        return {"error": "one-sided book", "midpoint": 0.0}  # no usable mid
+
+    monkeypatch.setattr(ex.order_book, "fetch_order_book", fake_book)
+    res = ex.get_live_account()
+    assert res["marked"] == 1
+    assert res["unmarked"] == 1
+    # Only GOOD is marked: 10 * 0.50 = 5.0 value, unrealized 5.0 - 4.0 = 1.0.
+    assert res["total_position_value"] == 5.0
+    assert res["unrealized_pnl"] == 1.0
+    # total_cost still sums BOTH positions' cost (4 + 10).
+    assert res["total_cost"] == 14.0
+    assert res["equity"] == 105.0  # 100 + 5
+    # The unmarked BAD position is present with null marks.
+    bad = next(p for p in res["positions"] if p["market_id"] == "BAD")
+    assert bad["current_price"] is None
+    assert bad["market_value"] is None
+    assert bad["unrealized_pnl"] is None
+    assert bad["shares"] == 50.0
+
+
+def test_get_live_account_balance_unreadable_is_error(env, monkeypatch):
+    # Key set but the balance read fails -> error/unavailable shape, never raises,
+    # and positions are NOT fetched/marked.
+    _, ex = env
+    monkeypatch.setattr(ex.config, "POLYMARKET_PRIVATE_KEY", "0xkey")
+    monkeypatch.setattr(ex, "get_live_balance",
+        lambda: {"error": "RuntimeError: clob down", "balance_usd": None})
+    monkeypatch.setattr(ex, "get_live_positions",
+        lambda: pytest.fail("positions must not be fetched when balance fails"))
+    monkeypatch.setattr(ex.order_book, "fetch_order_book",
+        lambda tid: pytest.fail("no marking when balance fails"))
+    res = ex.get_live_account()
+    assert res["status"] == "error"
+    assert "clob down" in res["reason"]
+
+
+def test_get_live_account_empty_positions(env, monkeypatch):
+    # Flat live account: real balance, no positions -> equity == balance, zero
+    # aggregates, empty positions list.
+    _, ex = env
+    monkeypatch.setattr(ex.config, "POLYMARKET_PRIVATE_KEY", "0xkey")
+    monkeypatch.setattr(ex, "get_live_balance", lambda: {"balance_usd": 75.0})
+    monkeypatch.setattr(ex, "get_live_positions", lambda: [])
+    monkeypatch.setattr(ex.order_book, "fetch_order_book",
+        lambda tid: pytest.fail("no marking with zero positions"))
+    res = ex.get_live_account()
+    assert res["source"] == "polymarket"
+    assert res["balance_usd"] == 75.0
+    assert res["equity"] == 75.0
+    assert res["total_position_value"] == 0.0
+    assert res["total_cost"] == 0.0
+    assert res["unrealized_pnl"] == 0.0
+    assert res["positions"] == []
+    assert res["marked"] == 0
+    assert res["unmarked"] == 0

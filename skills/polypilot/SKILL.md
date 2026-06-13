@@ -211,6 +211,11 @@ about fills and kill-switch trips.
     that `sync_live_positions` only reports.
   - `sync_live_positions` — diff on-chain vs locally-tracked positions to spot
     drift (reports `in_sync` only when the chain was actually readable). Read-only.
+  - `get_live_account` — authoritative Polymarket-sourced snapshot: real balance,
+    positions marked at live midpoints, equity, and unrealized PnL. In live mode,
+    **trust `get_live_account` (chain truth) over the modeled local cash/positions**
+    for balance and positions; only realized PnL stays a locally-derived figure.
+    Read-only.
   - `get_live_balance` — on-chain USDC collateral balance from the CLOB.
     Read-only.
   - `get_open_orders` — list your resting (unfilled) limit orders on the CLOB.
