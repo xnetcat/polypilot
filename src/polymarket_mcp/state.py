@@ -146,6 +146,19 @@ def record_evaluation(mode, *, market_id, question, category, keywords, decision
         conn.close()
 
 
+def update_thesis(mode, position_id, thesis, confidence, fair_prob) -> bool:
+    conn = db.connect(mode)
+    try:
+        cur = conn.execute(
+            "UPDATE positions SET thesis=?, confidence=?, fair_prob=? "
+            "WHERE id=? AND status='open'",
+            (thesis, confidence, fair_prob, position_id))
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
 def get_similar_markets(mode, text: str, limit: int = 5) -> list[dict]:
     """Keyword-overlap lookup over past evaluations. Mirrors PolyDegen's
     similar-market intelligence: rank by count of shared tokens."""

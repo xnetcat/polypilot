@@ -4,9 +4,12 @@ from __future__ import annotations
 from mcp.server.fastmcp import FastMCP
 
 from . import analytics as _analytics
+from . import execution as _execution
 from . import markets as _markets
 from . import order_book as _order_book
+from . import pacing as _pacing
 from . import risk as _risk
+from . import state as _state
 from .research import crypto as _crypto
 from .research import economic as _economic
 from .research import news as _news
@@ -140,6 +143,89 @@ def get_news(topic: str, limit: int = 20) -> dict:
     """Recent news headlines (RSS, plus NewsAPI if configured) matching a topic.
     Use to form or re-check a thesis on news-driven markets."""
     return _news.fetch_news(topic, limit=limit)
+
+
+# --- Execution tools ---
+
+
+@mcp.tool()
+def place_order(market_id: str, token_id: str, question: str, category: str,
+                side: str, size_usd: float, fair_prob: float | None = None,
+                confidence: float | None = None, thesis: str = "",
+                limit_price: float | None = None) -> dict:
+    """Buy `side` ('YES' or 'NO') on a market for size_usd. Records your thesis,
+    confidence, and fair_prob with the position. Enforces the kill-switch and
+    refuses if the breaker is tripped or cash is insufficient. Returns fill
+    details or a rejection reason. Get token_id from get_market()."""
+    return _execution.place_order(market_id=market_id, token_id=token_id,
+        question=question, category=category, side=side, size_usd=size_usd,
+        fair_prob=fair_prob, confidence=confidence, thesis=thesis,
+        limit_price=limit_price)
+
+
+@mcp.tool()
+def reconcile_positions() -> dict:
+    """Settle any open positions whose markets have resolved (price → 0 or 1),
+    crediting payouts and updating realized PnL. Run at the start of each cycle."""
+    return _execution.reconcile_positions()
+
+
+@mcp.tool()
+def close_position(position_id: int) -> dict:
+    """Sell an open position now at the current best bid. Use to recycle capital
+    out of near-resolved positions when you have a clearly better edge — NOT as a
+    stop-loss."""
+    return _execution.close_position(position_id=position_id)
+
+
+# --- Portfolio + memory tools ---
+
+
+@mcp.tool()
+def get_portfolio() -> dict:
+    """Cash, realized/unrealized PnL, open position count, exposure, mode."""
+    return _state.get_portfolio()
+
+
+@mcp.tool()
+def get_positions(status: str = "open") -> dict:
+    """Open (or 'closed') positions with entry price, size, shares, and the
+    stored thesis/confidence/fair_prob you saved at entry."""
+    return {"positions": _state.get_positions(status=status)}
+
+
+@mcp.tool()
+def get_trade_history(limit: int = 50) -> dict:
+    """Recent buy/sell trades with prices and outcomes."""
+    return {"trades": _state.get_trade_history(limit=limit)}
+
+
+@mcp.tool()
+def record_thesis(position_id: int, thesis: str, confidence: float,
+                  fair_prob: float) -> dict:
+    """Attach/refresh your written thesis, confidence, and fair probability to an
+    open position so you can re-check it against new data next cycle."""
+    ok = _state.update_thesis(_state.config.MODE, position_id, thesis,
+                              confidence, fair_prob)
+    return {"status": "ok" if ok else "not_found", "position_id": position_id}
+
+
+@mcp.tool()
+def get_similar_markets(keywords: str, limit: int = 5) -> dict:
+    """Your historical track record on past markets matching these keywords —
+    what you decided and how it resolved. Use to screen candidates."""
+    return {"similar": _state.get_similar_markets(_state.config.MODE, keywords, limit)}
+
+
+# --- Pacing ---
+
+
+@mcp.tool()
+def wait_for_next_cycle(min_seconds: int = 300) -> dict:
+    """Pause between trading cycles. Sleeps server-side for ~min_seconds but
+    returns early if a held position nears resolution so you can settle it.
+    Call this at the end of each cycle, then start the next cycle."""
+    return _pacing.wait_for_next_cycle(min_seconds=min_seconds)
 
 
 def main() -> None:
