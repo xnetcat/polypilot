@@ -340,6 +340,51 @@ def get_live_balance() -> dict:
         return {"error": f"{type(e).__name__}: {e}", "balance_usd": None}
 
 
+def sync_live_balance(mode: str = "live") -> dict:
+    """Anchor LIVE local cash to the REAL on-chain USDC balance. Best-effort:
+    never raises.
+
+    The running cash ledger (debited on open, credited on settle) is a *model*
+    that can drift from reality across restarts or off-pilot activity. This reads
+    the actual wallet collateral via ``get_live_balance`` and pegs local cash to
+    it via ``state.set_cash``. On the FIRST sync of a fresh live portfolio (no
+    trades yet) it also sets ``starting_balance`` to the wallet balance, so the
+    conservation baseline starts from reality (cash == starting, realized 0,
+    exposure 0). Once trades exist, later syncs only true-up cash, leaving the
+    original baseline intact so realized PnL keeps measuring drift from it.
+
+    Returns one of:
+      * ``{"status": "error", "reason": ...}`` — no key, or the balance read
+        returned an error,
+      * ``{"status": "unavailable", "reason": ...}`` — balance read succeeded but
+        carried no numeric ``balance_usd``,
+      * ``{"status": "synced", "cash": float, "set_starting": bool}`` — cash (and
+        possibly the baseline) was anchored to the wallet balance.
+    """
+    if not config.POLYMARKET_PRIVATE_KEY:
+        return {"status": "error", "reason": "POLYMARKET_PRIVATE_KEY not set"}
+    try:
+        bal = get_live_balance()
+    except Exception as e:  # get_live_balance is already guarded, but be safe.
+        return {"status": "error", "reason": f"{type(e).__name__}: {e}"}
+    if not isinstance(bal, dict):
+        return {"status": "unavailable", "reason": "balance read returned no value"}
+    if bal.get("error"):
+        return {"status": "error", "reason": bal["error"]}
+    balance_usd = bal.get("balance_usd")
+    if not isinstance(balance_usd, (int, float)):
+        return {"status": "unavailable",
+                "reason": "balance read returned no numeric balance_usd"}
+    try:
+        # First sync of an untraded live portfolio establishes BOTH cash and the
+        # starting-balance baseline from the wallet; later syncs only true-up cash.
+        set_starting = state.get_portfolio(mode).get("trade_count", 0) == 0
+        state.set_cash(mode, balance_usd, set_starting=set_starting)
+    except Exception as e:
+        return {"status": "error", "reason": f"{type(e).__name__}: {e}"}
+    return {"status": "synced", "cash": balance_usd, "set_starting": set_starting}
+
+
 def _fetch_live_positions() -> tuple[list[dict], str | None]:
     """Fetch + aggregate on-chain positions, distinguishing a genuine empty
     result from a fetch failure. Returns ``(positions, error)`` where ``error``

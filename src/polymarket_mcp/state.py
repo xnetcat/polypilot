@@ -53,6 +53,33 @@ def get_portfolio(mode: str | None = None) -> dict:
         conn.close()
 
 
+def set_cash(mode: str, cash: float, *, set_starting: bool = False) -> dict:
+    """Anchor portfolio cash to an externally-known value, returning the updated
+    ``get_portfolio(mode)`` dict.
+
+    Ensures the portfolio row exists, then overwrites ``cash`` directly (and
+    ``starting_balance`` too when ``set_starting=True``). This is the explicit
+    "true-up" used to peg LIVE cash to the real on-chain USDC balance — distinct
+    from the running ledger that ``open_position``/``close_position`` maintain.
+    Setting ``starting_balance`` at the same time (used on the FIRST sync of a
+    fresh live portfolio) keeps the conservation baseline sane: cash == starting,
+    no realized PnL, no exposure. Later syncs leave ``starting_balance`` alone so
+    realized PnL still measures drift from the original baseline."""
+    conn = db.connect(mode)
+    try:
+        _ensure_portfolio(conn, mode)
+        if set_starting:
+            conn.execute(
+                "UPDATE portfolio_state SET cash=?, starting_balance=? WHERE id=1",
+                (cash, cash))
+        else:
+            conn.execute("UPDATE portfolio_state SET cash=? WHERE id=1", (cash,))
+        conn.commit()
+    finally:
+        conn.close()
+    return get_portfolio(mode)
+
+
 def _roll_day(conn) -> None:
     today = time.strftime("%Y-%m-%d")
     ps = conn.execute("SELECT day_date FROM portfolio_state WHERE id=1").fetchone()
