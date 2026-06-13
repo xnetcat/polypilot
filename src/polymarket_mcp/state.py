@@ -90,6 +90,52 @@ def open_position(mode, *, market_id, token_id, question, category, side,
         conn.close()
 
 
+def adopt_live_position(mode, *, market_id, token_id, question, category, side,
+                        entry_price, size_usd, shares, fair_prob=None,
+                        confidence=None, thesis="", metadata=None) -> int | None:
+    """Reconcile an on-chain position into local state WITHOUT treating it as a
+    new trade. Unlike ``open_position`` this:
+
+      * does NOT debit cash (the USDC was spent on-chain, not from tracked cash),
+      * does NOT increment ``trade_count`` or log a 'buy' trade row,
+
+    because we are recording REALITY, not executing an order. It is idempotent on
+    the one-open-position-per-market unique index: re-adopting an
+    already-tracked market UPDATES that open row's shares/entry/size in place
+    (so a changed on-chain holding is reflected) rather than raising or
+    duplicating. Returns the position id (existing or newly created), or None if
+    no row could be resolved (should not happen in practice)."""
+    conn = db.connect(mode)
+    try:
+        _ensure_portfolio(conn, mode)
+        # Guard the partial unique index (one open position per market): if this
+        # market already has an open row, update it in place and return its id.
+        existing = conn.execute(
+            "SELECT id FROM positions WHERE market_id=? AND status='open'",
+            (market_id,)).fetchone()
+        if existing is not None:
+            conn.execute(
+                "UPDATE positions SET token_id=?, question=?, category=?, side=?, "
+                "entry_price=?, size_usd=?, shares=?, fair_prob=?, confidence=?, "
+                "thesis=?, metadata=? WHERE id=?",
+                (token_id, question, category, side, entry_price, size_usd, shares,
+                 fair_prob, confidence, thesis, json.dumps(metadata or {}),
+                 existing["id"]))
+            conn.commit()
+            return existing["id"]
+        cur = conn.execute(
+            "INSERT INTO positions (market_id, token_id, question, category, side, "
+            "entry_price, size_usd, shares, fair_prob, confidence, thesis, mode, "
+            "status, opened_at, metadata) VALUES (?,?,?,?,?,?,?,?,?,?,?,?, 'open', ?, ?)",
+            (market_id, token_id, question, category, side, entry_price, size_usd,
+             shares, fair_prob, confidence, thesis, mode, time.time(),
+             json.dumps(metadata or {})))
+        conn.commit()
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
 def close_position(mode, position_id: int, *, exit_price: float, payout: float) -> dict:
     conn = db.connect(mode)
     try:

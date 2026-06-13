@@ -495,6 +495,124 @@ def sync_live_positions(mode: str = "live") -> dict:
     }
 
 
+def get_open_orders() -> dict:
+    """Fetch resting/open (unfilled or partially-filled) orders from the CLOB.
+
+    Returns ``{"orders": [ {order_id, market, token_id, side, price, size,
+    size_matched, outcome, order_type, status}, ... ]}`` on success, or
+    ``{"error": str}`` when no private key is configured or the call fails.
+    Never raises. Requires a private key (orders are per-API-key, Level-2 auth).
+
+    The CLOB ``get_orders`` returns raw order dicts whose field names vary by
+    build; we read each field defensively (e.g. ``id``/``orderID`` for the id,
+    ``asset_id``/``token_id`` for the token) so a schema drift degrades to a
+    missing value rather than an exception."""
+    if not config.POLYMARKET_PRIVATE_KEY:
+        return {"error": "POLYMARKET_PRIVATE_KEY not set"}
+    try:
+        client = _get_clob_client()
+        raw = client.get_orders()
+    except Exception as e:
+        return {"error": f"{type(e).__name__}: {e}"}
+    # A genuinely empty book (no resting orders) is success, not an error.
+    if not raw:
+        return {"orders": []}
+    if not isinstance(raw, list):
+        return {"error": f"unexpected get_orders response type: {type(raw).__name__}"}
+    orders = []
+    for o in raw:
+        if not isinstance(o, dict):
+            continue
+        orders.append({
+            "order_id": o.get("id") or o.get("orderID") or o.get("order_id") or "",
+            "market": o.get("market", ""),
+            "token_id": o.get("asset_id") or o.get("token_id") or "",
+            "side": o.get("side", ""),
+            "price": o.get("price"),
+            "size": o.get("original_size") or o.get("size"),
+            "size_matched": o.get("size_matched"),
+            "outcome": o.get("outcome", ""),
+            "order_type": o.get("order_type") or o.get("type") or "",
+            "status": o.get("status", ""),
+        })
+    return {"orders": orders}
+
+
+def cancel_order(order_id: str) -> dict:
+    """Cancel a single resting order on the CLOB by id. Returns
+    ``{"status": "cancelled", "order_id": ...}`` on success or
+    ``{"status": "error", "reason": ...}`` otherwise. Never raises. Requires a
+    private key (Level-2 auth). Guards the import + missing key + any client
+    exception so a flaky cancel can't crash the caller.
+
+    Note the CLOB ``cancel`` response may report individual orders that could
+    not be cancelled (e.g. already filled) under ``not_canceled``; we surface
+    that detail but still treat a non-erroring call as ``cancelled``."""
+    if not isinstance(order_id, str) or not order_id.strip():
+        return {"status": "error", "reason": "order_id must be a non-empty string"}
+    if not config.POLYMARKET_PRIVATE_KEY:
+        return {"status": "error", "reason": "POLYMARKET_PRIVATE_KEY not set"}
+    try:
+        client = _get_clob_client()
+        resp = client.cancel(order_id)
+    except Exception as e:
+        return {"status": "error", "reason": f"{type(e).__name__}: {e}"}
+    result = {"status": "cancelled", "order_id": order_id}
+    # Surface any detail the CLOB returns (e.g. canceled/not_canceled maps).
+    if isinstance(resp, dict):
+        not_canceled = resp.get("not_canceled")
+        if not_canceled:
+            result["not_canceled"] = not_canceled
+    return result
+
+
+def import_live_positions(mode: str = "live") -> dict:
+    """ADOPT on-chain positions that are not yet tracked locally into local
+    state. Where ``sync_live_positions`` only REPORTS drift, this RECONCILES it:
+    for each on-chain position whose market is not already an open local
+    position, it calls ``state.adopt_live_position`` (which inserts an open row
+    WITHOUT debiting cash or logging a buy trade — see its docstring). This is
+    how live position tracking survives a restart.
+
+    Returns ``{"adopted": n, "skipped": n, "details": [...]}`` on success, or an
+    ``error``/``fetch_error`` form with ``adopted: 0`` when the chain cannot be
+    read. Requires a private key. Never raises on the live fetch (it goes
+    through the failure-aware ``_fetch_live_positions``)."""
+    if not config.POLYMARKET_PRIVATE_KEY:
+        return {"error": "POLYMARKET_PRIVATE_KEY not set", "adopted": 0, "skipped": 0}
+
+    on_chain, fetch_error = _fetch_live_positions()
+    if fetch_error is not None:
+        return {"fetch_error": fetch_error, "adopted": 0, "skipped": 0}
+
+    # Markets already tracked as open locally -> skip (idempotent / no clobber).
+    local_markets = {str(p.get("market_id", ""))
+                     for p in state.get_positions(mode, status="open")}
+
+    adopted = 0
+    skipped = 0
+    details = []
+    for p in on_chain:
+        market_id = str(p.get("market_id", ""))
+        if market_id in local_markets:
+            skipped += 1
+            continue
+        shares = p.get("shares") or 0.0
+        avg_price = p.get("avg_price") or 0.0
+        cost = p.get("cost")
+        size_usd = cost if cost is not None else round(shares * avg_price, 2)
+        outcome = p.get("outcome", "")
+        state.adopt_live_position(
+            mode, market_id=market_id, token_id=p.get("asset_id", ""),
+            question=outcome or market_id, category="", side=outcome,
+            entry_price=avg_price, size_usd=size_usd, shares=shares,
+            thesis="adopted from on-chain position")
+        adopted += 1
+        details.append({"market_id": market_id, "outcome": outcome,
+                        "shares": shares, "avg_price": avg_price})
+    return {"adopted": adopted, "skipped": skipped, "details": details}
+
+
 def preflight_live() -> dict:
     """Pre-flight checklist for live trading. Never raises. Returns
     ``{"ok": bool, "checks": {...}}`` where each check is a boolean (or a small
