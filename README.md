@@ -165,7 +165,7 @@ A single cumulative-loss circuit breaker is the one rule enforced in code:
 Everything else — strategy, edge bar, position sizing, concentration, and
 timing — is the agent's judgment, not hardcoded.
 
-## Tool surface (29 tools)
+## Tool surface (34 tools)
 
 Grouped by purpose. The agent calls what it needs; all tools return plain JSON.
 
@@ -195,6 +195,13 @@ Grouped by purpose. The agent calls what it needs; all tools return plain JSON.
 - `get_live_balance` — on-chain USDC (collateral) balance from the CLOB.
 - `sync_live_positions` — diff on-chain positions vs. the local ledger (`on_chain_only` / `local_only` / `matched` / `in_sync`) without mutating state.
 - `preflight_live` — pre-flight checklist before going live: key set, derivable CLOB creds, positive balance, kill-switch configured. Returns `{ok, checks}`; never raises.
+- `get_open_orders` — list your resting (unfilled/partially-filled) limit orders on the CLOB; `{orders: [...]}` or `{error}` with no key. Never raises.
+- `cancel_order` — cancel a single resting order by id (ids from `get_open_orders`); `{status: cancelled, order_id}` or `{status: error, reason}`. Never raises.
+- `import_live_positions` — adopt on-chain positions not yet tracked locally into local state (no cash debit, no buy logged), so live tracking survives a restart; reconciles the drift `sync_live_positions` only reports.
+
+**Backtesting / calibration**
+- `get_scorecard` — decision-quality scorecard over your resolved trades (win rate, ROI, Brier score, log loss, and a 10-bucket calibration table), overall and per category; consult it to calibrate your own confidence.
+- `list_resolved_markets` — recently resolved real markets with their winning outcome, to backtest/practice forecasting against.
 
 **Portfolio / Memory**
 - `get_portfolio` — cash, realized PnL, open count, exposure, mode; best-effort marks open positions to market (book midpoints) to add `unrealized_pnl`, `mark_to_market_value`, and `total_pnl`.

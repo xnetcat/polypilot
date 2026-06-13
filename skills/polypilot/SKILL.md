@@ -100,6 +100,10 @@ in-session loop** until the user stops you or the kill-switch trips.
   stake-based ROI per category. Press harder where you've proven positive ROI with
   a real sample, and pull back where you're net negative — still judgment, not a
   formula.
+- **Calibrate your confidence.** Periodically consult `get_scorecard` (Brier, log
+  loss, and a calibration table over your resolved trades): if a bucket's actual
+  win rate sits below its mean predicted probability you're over-confident — rein
+  in future `fair_prob` estimates accordingly (and vice versa).
 - The `polypilot-researcher` and `polypilot-skeptic` subagents are **optional
   accelerators**, not required steps. They parallelize research and add a
   red-team check when you can dispatch them; when you can't, inline reasoning with
@@ -155,6 +159,13 @@ about fills and kill-switch trips.
     resolved evaluations, broken down by category; learn what you trade well.
   - `get_session_report` — one-shot snapshot (portfolio + risk + performance +
     recent trades + open count) for an end-of-cycle status check.
+- **Backtesting / calibration**: `get_scorecard` — decision-quality scorecard
+  (win rate, ROI, Brier, log loss, and a 10-bucket calibration table) over your
+  resolved trades; consult it to gauge and **calibrate your own confidence**
+  (compare each bucket's mean predicted prob vs. actual win rate, then adjust your
+  `fair_prob` estimates if you're over/under-confident). `list_resolved_markets`
+  — recently resolved real markets with winning outcomes, to backtest/practice
+  forecasting against.
 - **Markets**: `list_markets`, `get_market`, `get_order_book`,
   `get_price_history`.
 - **Research**: `get_weather_forecast`, `get_crypto`, `get_sports`,
@@ -168,6 +179,12 @@ about fills and kill-switch trips.
     drift (reports `in_sync` only when the chain was actually readable).
   - `preflight_live` — pre-flight checklist (key set, CLOB creds, positive
     balance, kill-switch configured) before any live trading.
+  - `get_open_orders` — list your resting (unfilled) limit orders on the CLOB.
+  - `cancel_order` — cancel a single resting order by id (ids from
+    `get_open_orders`).
+  - `import_live_positions` — adopt on-chain positions not yet tracked locally
+    into local state (so live tracking survives a restart); reconciles the drift
+    that `sync_live_positions` only reports.
 
 ## Subagents (optional, when available)
 Auto-discovered from the plugin's `agents/` directory; usable only by clients

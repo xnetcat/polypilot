@@ -286,3 +286,136 @@ def test_list_markets_binary_only_filters_multi_outcome(srv, monkeypatch):
     assert bin_out["count"] == 1
     assert bin_out["markets"][0]["market_id"] == "b1"
     assert bin_out["markets"][0]["is_binary"] is True
+
+
+# --------------------------------------------------------------------------- #
+# get_scorecard -> replay.scorecard (seeded resolved-eval DB)
+# --------------------------------------------------------------------------- #
+def test_get_scorecard_shape_empty(srv):
+    # Fresh paper DB: no resolved trades -> fully-zeroed overall bucket, empty
+    # by_category, and no divide-by-zero / math-domain error.
+    sc = srv.get_scorecard()
+    assert set(sc.keys()) == {"overall", "by_category"}
+    overall = sc["overall"]
+    for key in ("count", "wins", "losses", "win_rate", "total_pnl",
+                "total_stake", "roi", "brier", "log_loss", "calibration"):
+        assert key in overall
+    assert overall["count"] == 0
+    assert overall["calibration"] != []  # ten stable decile buckets always present
+    assert len(overall["calibration"]) == 10
+    assert sc["by_category"] == {}
+
+
+def test_get_scorecard_over_seeded_resolved_trades(srv):
+    # Seed two resolved BUY trades in the isolated paper DB: one win, one loss,
+    # then confirm the scorecard reflects win-rate / ROI / probabilistic metrics.
+    # Winner: buy_yes, fair_prob 0.7, +12 PnL on a 20 stake.
+    w = srv._state.record_evaluation("paper", market_id="mw", question="W",
+        category="crypto", keywords="btc", decision="buy_yes", side="YES",
+        confidence=0.8, fair_prob=0.7, yes_price=0.55, thesis="t", stake_usd=20.0)
+    assert isinstance(w, int) and w > 0
+    srv._state.update_evaluation_outcome("paper", "mw", "YES", 1.0, 12.0)
+    # Loser: buy_no, fair_prob 0.6 (chosen-side prob 0.4), -10 PnL on a 10 stake.
+    li = srv._state.record_evaluation("paper", market_id="ml", question="L",
+        category="crypto", keywords="eth", decision="buy_no", side="NO",
+        confidence=0.6, fair_prob=0.6, yes_price=0.45, thesis="t", stake_usd=10.0)
+    assert isinstance(li, int) and li > 0
+    srv._state.update_evaluation_outcome("paper", "ml", "NO", 0.0, -10.0)
+
+    sc = srv.get_scorecard()
+    overall = sc["overall"]
+    assert overall["count"] == 2
+    assert overall["wins"] == 1
+    assert overall["losses"] == 1
+    assert overall["win_rate"] == 0.5
+    # ROI = net PnL / summed stake = (12 - 10) / (20 + 10) = 2 / 30.
+    assert overall["total_pnl"] == 2.0
+    assert overall["total_stake"] == 30.0
+    assert overall["roi"] == round(2.0 / 30.0, 4)
+    # Probabilistic metrics computed over both rows (both carry a fair_prob).
+    assert overall["brier"] > 0.0
+    assert overall["log_loss"] > 0.0
+    # Both trades are crypto -> a single by_category bucket mirrors overall.
+    assert set(sc["by_category"]) == {"crypto"}
+    assert sc["by_category"]["crypto"]["count"] == 2
+
+
+def test_get_scorecard_delegates_to_replay(srv, monkeypatch):
+    sentinel = {"overall": {"count": 7}, "by_category": {}}
+    called = {}
+
+    def fake_scorecard():
+        called["hit"] = True
+        return sentinel
+
+    monkeypatch.setattr(srv._replay, "scorecard", fake_scorecard)
+    out = srv.get_scorecard()
+    assert out is sentinel
+    assert called["hit"] is True
+
+
+# --------------------------------------------------------------------------- #
+# list_resolved_markets -> replay.fetch_resolved_markets (monkeypatched)
+# --------------------------------------------------------------------------- #
+def test_list_resolved_markets_shape(srv, monkeypatch):
+    rows = [
+        {"market_id": "r1", "question": "Did X happen?", "category": "crypto",
+         "winning_outcome": "Yes"},
+        {"market_id": "r2", "question": "Who won?", "category": "sports",
+         "winning_outcome": None},
+    ]
+    captured = {}
+
+    def fake_fetch(limit):
+        captured["limit"] = limit
+        return rows
+
+    monkeypatch.setattr(srv._replay, "fetch_resolved_markets", fake_fetch)
+    out = srv.list_resolved_markets(limit=5)
+    assert captured["limit"] == 5
+    assert out["count"] == 2
+    assert out["markets"] == rows
+    assert out["markets"][0]["winning_outcome"] == "Yes"
+    assert out["markets"][1]["winning_outcome"] is None
+
+
+def test_list_resolved_markets_empty_on_fetch_failure(srv, monkeypatch):
+    # replay.fetch_resolved_markets is best-effort and returns [] on failure;
+    # the wrapper must surface that as a clean, count=0 shape (never raise).
+    monkeypatch.setattr(srv._replay, "fetch_resolved_markets", lambda limit: [])
+    out = srv.list_resolved_markets()
+    assert out == {"count": 0, "markets": []}
+
+
+# --------------------------------------------------------------------------- #
+# Live-ops wrappers: graceful no-key / error shapes by default (no network)
+# --------------------------------------------------------------------------- #
+def test_get_open_orders_no_key_error(srv, monkeypatch):
+    # No private key -> error dict, never a raise, no network call.
+    monkeypatch.setattr(srv._execution.config, "POLYMARKET_PRIVATE_KEY", "")
+    out = srv.get_open_orders()
+    assert "error" in out
+    assert "orders" not in out
+
+
+def test_cancel_order_no_key_error(srv, monkeypatch):
+    monkeypatch.setattr(srv._execution.config, "POLYMARKET_PRIVATE_KEY", "")
+    out = srv.cancel_order("abc123")
+    assert out["status"] == "error"
+    assert "reason" in out
+
+
+def test_cancel_order_rejects_blank_id(srv, monkeypatch):
+    # Even with a key set, a blank order_id must be rejected before any call.
+    monkeypatch.setattr(srv._execution.config, "POLYMARKET_PRIVATE_KEY", "0xdead")
+    out = srv.cancel_order("   ")
+    assert out["status"] == "error"
+    assert "reason" in out
+
+
+def test_import_live_positions_no_key_error(srv, monkeypatch):
+    monkeypatch.setattr(srv._execution.config, "POLYMARKET_PRIVATE_KEY", "")
+    out = srv.import_live_positions()
+    assert "error" in out
+    assert out["adopted"] == 0
+    assert out["skipped"] == 0

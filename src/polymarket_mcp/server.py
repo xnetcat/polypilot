@@ -9,6 +9,7 @@ from . import markets as _markets
 from . import notifications as _notifications
 from . import order_book as _order_book
 from . import pacing as _pacing
+from . import replay as _replay
 from . import risk as _risk
 from . import state as _state
 from .research import crypto as _crypto
@@ -221,6 +222,34 @@ def preflight_live() -> dict:
     return _execution.preflight_live()
 
 
+@mcp.tool()
+def get_open_orders() -> dict:
+    """LIVE: fetch your resting (unfilled/partially-filled) limit orders from the
+    CLOB. Returns {'orders': [{order_id, market, token_id, side, price, size,
+    size_matched, outcome, order_type, status}, ...]} or {'error': ...} when no
+    key is configured or the call fails. Never raises. Read-only."""
+    return _execution.get_open_orders()
+
+
+@mcp.tool()
+def cancel_order(order_id: str) -> dict:
+    """LIVE: cancel a single resting order on the CLOB by its order_id (get ids
+    from get_open_orders). Returns {'status': 'cancelled', 'order_id': ...} on
+    success or {'status': 'error', 'reason': ...} otherwise. Never raises."""
+    return _execution.cancel_order(order_id)
+
+
+@mcp.tool()
+def import_live_positions() -> dict:
+    """LIVE: ADOPT on-chain positions not yet tracked locally into local state
+    (inserts open rows WITHOUT debiting cash or logging a buy) so live tracking
+    survives a restart. Where sync_live_positions only reports drift, this
+    reconciles it. Returns {'adopted': n, 'skipped': n, 'details': [...]} or an
+    error/fetch_error form with adopted: 0 when the chain can't be read. Never
+    raises."""
+    return _execution.import_live_positions()
+
+
 # --- Portfolio + memory tools ---
 
 
@@ -337,6 +366,32 @@ def record_evaluation(market_id: str, question: str, category: str,
         decision=decision, side=side, confidence=confidence, fair_prob=fair_prob,
         yes_price=yes_price, thesis=thesis, stake_usd=stake_usd)
     return {"status": "ok", "id": row_id}
+
+
+# --- Backtesting / calibration ---
+
+
+@mcp.tool()
+def get_scorecard() -> dict:
+    """Decision-quality scorecard over your RESOLVED trades: win rate, ROI, Brier
+    score, log loss, and a 10-bucket calibration table — overall and per category.
+    Use it to GAUGE and CALIBRATE your own forecasting: compare each calibration
+    bucket's mean predicted probability against its actual win rate to see whether
+    you are systematically over- or under-confident, then adjust your fair_prob
+    estimates accordingly. Returns {'overall': {...}, 'by_category': {...}}; an
+    empty/no-resolved-trades DB yields fully-zeroed buckets (never raises)."""
+    return _replay.scorecard()
+
+
+@mcp.tool()
+def list_resolved_markets(limit: int = 20) -> dict:
+    """Recently RESOLVED Polymarket markets with their winning outcome — real
+    closed markets you can backtest or practice forecasting against. Returns
+    {'count': n, 'markets': [{market_id, question, category, winning_outcome},
+    ...]}; winning_outcome is None when it can't be inferred. Best-effort: a
+    network/parse failure yields an empty list rather than raising."""
+    markets = _replay.fetch_resolved_markets(limit)
+    return {"count": len(markets), "markets": markets}
 
 
 # --- Notifications ---
