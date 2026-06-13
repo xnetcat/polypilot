@@ -188,23 +188,73 @@ def _normalize_city_name(value: str) -> str:
     return normalized.strip(" ,.-")
 
 
+# Tokens that mark the END of a city name in a "in/at/for <city> ..." phrase
+# (verbs, prepositions, qualifiers). The capture also stops at a digit, degree
+# sign, or punctuation, so arbitrary city names — not just a catalog — are
+# extracted and handed to the geocoder.
+_CITY_STOP_WORDS = (
+    "be|is|was|been|reach|reaches|hit|hits|exceed|exceeds|surpass|surpasses|"
+    "top|tops|go|get|gets|rise|rises|fall|falls|drop|drops|climb|climbs|stay|"
+    "stays|see|sees|record|records|on|by|this|next|today|tomorrow|above|below|"
+    "over|under|between|will|and|or|during|for|to"
+)
+# Verbs that follow a subject-position city ("Will <City> hit 35C ...").
+_SUBJECT_VERBS = (
+    "be|reach|reaches|hit|hits|exceed|exceeds|surpass|surpasses|top|tops|get|"
+    "gets|go|goes|rise|rises|fall|falls|drop|drops|climb|climbs|stay|stays|"
+    "see|sees|record|records|have|has"
+)
+# Subject captures that are clearly NOT a city (generic question subjects).
+_SUBJECT_NON_CITY = {
+    "it", "the high", "high", "low", "the low", "temperature", "temp",
+    "the temperature", "high temperature", "low temperature", "weather",
+    "the weather", "there",
+}
+# A weather cue must be present before we trust the subject-position pattern, so
+# non-weather "Will <Subject> <verb>" questions never resolve a subject to a city.
+_WEATHER_CUE_RE = re.compile(
+    r"°|\b\d+\s*°?\s*[cf]\b|\b(?:temperature|temp|weather|forecast|degrees?|"
+    r"rain|snow|precipitation|humidity|heat|fahrenheit|celsius)\b",
+    re.IGNORECASE,
+)
+
+
 def _extract_city(question: str) -> str | None:
-    """Extract city name from a market question."""
+    """Extract a city name from a market question.
+
+    Catalog cities match first (fast path); otherwise the city is pulled from an
+    "in/at/for <city>" phrase or a subject-position "Will <City> <verb>" phrase
+    and handed to the geocoder — so coverage is not limited to the catalog.
+    """
     q = question.lower()
     for city in sorted(CITY_COORDS.keys(), key=len, reverse=True):
         if city in q:
             return city
+
+    stop = rf"(?=\s+(?:{_CITY_STOP_WORDS})\b|\s*[?,.\d°]|$)"
     patterns = [
-        r"\btemperature in\s+([a-z .'-]+?)(?:\s+be\b|\s+between\b|\s+on\b|\s+by\b|\s+today\b|\s+tomorrow\b|\?|$)",
-        r"\bin\s+([a-z .'-]+?)(?:\s+be\b|\s+between\b|\s+on\b|\s+by\b|\s+today\b|\s+tomorrow\b|\?|$)",
+        rf"\btemperature\s+(?:in|at|for)\s+([a-z][a-z .'-]*?){stop}",
+        rf"\b(?:in|at|for)\s+([a-z][a-z .'-]*?){stop}",
     ]
     for pattern in patterns:
         match = re.search(pattern, q)
         if not match:
             continue
         candidate = _normalize_city_name(match.group(1))
-        if candidate:
+        if candidate and candidate not in _SUBJECT_NON_CITY:
             return candidate
+
+    # Subject-position city ("Will Lagos hit 35C") — only when the question
+    # clearly concerns weather, to avoid grabbing non-city subjects.
+    if _WEATHER_CUE_RE.search(question):
+        m = re.search(
+            rf"\bwill\s+(?:the\s+|a\s+|it\s+)?([a-z][a-z .'-]*?)\s+(?:{_SUBJECT_VERBS})\b",
+            q,
+        )
+        if m:
+            candidate = _normalize_city_name(m.group(1))
+            if candidate and len(candidate) >= 3 and candidate not in _SUBJECT_NON_CITY:
+                return candidate
     return None
 
 

@@ -45,14 +45,68 @@ DEFAULT_HORIZON_DAYS = 7
 # Number of daily samples requested from CoinGecko for the volatility estimate.
 _VOL_WINDOW_DAYS = 30
 
-_COINS = {
-    "bitcoin": "bitcoin",
-    "btc": "bitcoin",
-    "ethereum": "ethereum",
-    "eth": "ethereum",
-    "solana": "solana",
-    "sol": "solana",
+# Curated fast-path aliases for common / ambiguous coins, mapping a name or
+# ticker (matched as a whole word, case-insensitively) to its CoinGecko id and a
+# display symbol. This is NOT the universe of supported coins — it only short-
+# circuits the most frequent ones (deterministic, collision-free, no extra API
+# call). ANY other coin is resolved dynamically via CoinGecko's /search endpoint
+# (see _resolve_coin), so coverage is not limited to this list.
+_COIN_ALIASES: dict[str, tuple[str, str]] = {
+    "bitcoin": ("bitcoin", "BTC"), "btc": ("bitcoin", "BTC"),
+    "ethereum": ("ethereum", "ETH"), "eth": ("ethereum", "ETH"),
+    "solana": ("solana", "SOL"), "sol": ("solana", "SOL"),
+    "ripple": ("ripple", "XRP"), "xrp": ("ripple", "XRP"),
+    "dogecoin": ("dogecoin", "DOGE"), "doge": ("dogecoin", "DOGE"),
+    "cardano": ("cardano", "ADA"), "ada": ("cardano", "ADA"),
+    "binance coin": ("binancecoin", "BNB"), "bnb": ("binancecoin", "BNB"),
+    "polkadot": ("polkadot", "DOT"),
+    "polygon": ("matic-network", "MATIC"), "matic": ("matic-network", "MATIC"),
+    "avalanche": ("avalanche-2", "AVAX"), "avax": ("avalanche-2", "AVAX"),
+    "chainlink": ("chainlink", "LINK"),
+    "litecoin": ("litecoin", "LTC"), "ltc": ("litecoin", "LTC"),
+    "shiba inu": ("shiba-inu", "SHIB"), "shib": ("shiba-inu", "SHIB"),
+    "tron": ("tron", "TRX"), "trx": ("tron", "TRX"),
+    "uniswap": ("uniswap", "UNI"),
+    "pepe": ("pepe", "PEPE"),
+    "stellar": ("stellar", "XLM"), "xlm": ("stellar", "XLM"),
+    "monero": ("monero", "XMR"),
+    "worldcoin": ("worldcoin-wld", "WLD"),
 }
+# Aliases tried longest-first so multi-word/specific names ("binance coin",
+# "ethereum") win before their shorter substrings ("bnb", "eth").
+_ALIAS_ORDER: list[str] = sorted(_COIN_ALIASES, key=len, reverse=True)
+
+# Words that are never a coin: question framing, finance terms, currency codes,
+# months, and weekdays. Used to filter candidate tokens for the /search fallback.
+_CANDIDATE_STOPWORDS = {
+    "will", "the", "this", "that", "be", "is", "are", "on", "by", "in", "at",
+    "to", "of", "and", "or", "above", "below", "over", "under", "reach",
+    "reaches", "hit", "hits", "exceed", "exceeds", "cross", "crosses", "close",
+    "closes", "end", "year", "price", "value", "worth", "than", "more", "less",
+    "least", "most", "between", "from", "high", "low", "next", "week", "month",
+    "day", "eoy", "ath", "atl", "usd", "usdt", "usdc", "what", "when", "which",
+    "january", "february", "march", "april", "may", "june", "july", "august",
+    "september", "october", "november", "december",
+    "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "sept", "oct",
+    "nov", "dec",
+    "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+    "mon", "tue", "wed", "thu", "fri", "sat", "sun",
+}
+
+# A crypto market virtually always references a price or coin context. We require
+# one of these cues before doing a dynamic /search on a question's proper nouns,
+# so a non-crypto question ("Will it rain in Tokyo tomorrow?") never resolves a
+# city/person to some obscure low-cap coin of the same name.
+_PRICE_CUE_RE = re.compile(
+    r"\$|\b(?:price|prices|priced|usd|usdt|usdc|market\s*cap|all[- ]time\s*high|"
+    r"ath|coin|token|crypto|satoshi|sats)\b",
+    re.IGNORECASE,
+)
+
+
+def _has_price_cue(question: str) -> bool:
+    """True if ``question`` carries a price/crypto cue (gates dynamic /search)."""
+    return bool(_PRICE_CUE_RE.search(question))
 
 # Month names -> month number, for parsing "on June 20" style target dates.
 _MONTHS = {
@@ -320,20 +374,86 @@ def _estimate_probability(
     return result
 
 
+def _coin_candidates(question: str) -> list[str]:
+    """Tokens from ``question`` worth resolving as a coin via /search.
+
+    Keeps capitalized words and all-caps tickers (proper-noun coin names like
+    "Dogecoin"/"Cardano" and tickers like "DOGE"), drops framing/finance/date
+    stopwords and lowercase prose, de-dupes, and caps the list at 4 to bound API
+    calls.
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    for tok in re.findall(r"[A-Za-z]{3,}", question):
+        if not any(c.isupper() for c in tok):
+            continue  # skip ordinary lowercase prose
+        low = tok.lower()
+        if low in _CANDIDATE_STOPWORDS or low in seen:
+            continue
+        seen.add(low)
+        out.append(tok)
+        if len(out) >= 4:
+            break
+    return out
+
+
+def _search_coin(query: str) -> tuple[str, str] | None:
+    """Resolve ``query`` to a CoinGecko ``(coin_id, SYMBOL)`` via /search.
+
+    Returns the top-ranked coin match (CoinGecko orders results by market-cap
+    relevance) or ``None`` on no match / any error. Never raises.
+    """
+    try:
+        resp = httpx.get(
+            "https://api.coingecko.com/api/v3/search",
+            params={"query": query},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        coins = resp.json().get("coins", []) or []
+    except Exception as e:  # noqa: BLE001 — best-effort, never raise.
+        log.debug("[research] Crypto /search error for %r: %s", query, e)
+        return None
+    for coin in coins:
+        if isinstance(coin, dict) and coin.get("id"):
+            return str(coin["id"]), str(coin.get("symbol") or "").upper()
+    return None
+
+
+def _resolve_coin(question: str) -> tuple[str, str, str] | None:
+    """Resolve the coin in ``question`` to ``(coin_id, matched, symbol)``.
+
+    Tries the curated alias map first (fast, deterministic, no API call), then
+    falls back to CoinGecko /search over candidate tokens so ANY listed coin —
+    not just the common ones — is covered. Returns ``None`` when nothing
+    resolves.
+    """
+    q = question.lower()
+    for alias in _ALIAS_ORDER:
+        if re.search(rf"\b{re.escape(alias)}\b", q):
+            coin_id, symbol = _COIN_ALIASES[alias]
+            return coin_id, alias, symbol
+    # Dynamic fallback (any listed coin) — only when the question reads like a
+    # crypto/price market, to avoid resolving incidental proper nouns.
+    if not _has_price_cue(question):
+        return None
+    for candidate in _coin_candidates(question):
+        hit = _search_coin(candidate)
+        if hit:
+            coin_id, symbol = hit
+            return coin_id, candidate.lower(), symbol
+    return None
+
+
 def _get_crypto_research(question: str) -> dict | None:
     cached = cache_get(_CACHE, question, CACHE_TTL_SECONDS)
     if cached is not _MISS:
         return cached
     q = question.lower()
-    coin_id = None
-    matched_keyword = ""
-    for keyword, cg_id in _COINS.items():
-        if keyword in q:
-            coin_id = cg_id
-            matched_keyword = keyword
-            break
-    if not coin_id:
+    resolved = _resolve_coin(question)
+    if not resolved:
         return None
+    coin_id, matched_keyword, symbol = resolved
 
     try:
         resp = httpx.get(
@@ -353,6 +473,7 @@ def _get_crypto_research(question: str) -> dict | None:
         vol = float(data.get("usd_24h_vol", 0) or 0)
         result: dict = {
             "coin_id": coin_id,
+            "symbol": symbol or coin_id.upper(),
             "symbol_hint": matched_keyword,
             "price_usd": price,
             "change_24h_pct": change,
@@ -419,11 +540,10 @@ def fetch_crypto(question: str) -> dict:
     if not research:
         return {"error": "no crypto asset detected in the question"}
 
-    symbol_map = {"bitcoin": "BTC", "ethereum": "ETH", "solana": "SOL"}
     coin_id = research["coin_id"]
     spot = research["price_usd"]
     result: dict = {
-        "symbol": symbol_map.get(coin_id, coin_id),
+        "symbol": research.get("symbol") or coin_id.upper(),
         "coin_id": coin_id,
         "spot_usd": spot,
         "change_24h": research["change_24h_pct"],

@@ -66,6 +66,50 @@ def test_extract_weather_identity_exact():
 
 
 # --------------------------------------------------------------------------- #
+# City extraction is not limited to the catalog (broad coverage via geocoding)
+# --------------------------------------------------------------------------- #
+def test_extract_city_non_catalog_in_phrase_with_verb():
+    # "exceed" used to break the "in <city>" capture; a non-catalog city must
+    # still be pulled out and handed to the geocoder.
+    assert weather._extract_city(
+        "Will the high in Phoenix exceed 110F on June 20?") == "phoenix"
+    assert weather._extract_city(
+        "Will it be above 40C in Riyadh on July 1?") == "riyadh"
+
+
+def test_extract_city_subject_position():
+    # "Will <City> <verb> <temp>" — the city sits before the verb, not after "in".
+    assert weather._extract_city("Will Lagos hit 35C tomorrow?") == "lagos"
+    assert weather._extract_city("Will Reykjavik reach 15C by Friday?") == "reykjavik"
+
+
+def test_extract_city_subject_requires_weather_cue():
+    # Same shape but no weather cue -> must NOT resolve the subject to a city.
+    assert weather._extract_city("Will Tesla beat earnings on Friday?") is None
+    assert weather._extract_city("Will the stock market crash?") is None
+
+
+def test_fetch_weather_geocodes_non_catalog_city(monkeypatch):
+    # End-to-end: a city absent from CITY_COORDS resolves via the geocoder and
+    # produces a forecast (proves coverage isn't limited to the catalog).
+    _clear_caches()
+    assert "lagos" not in weather.CITY_COORDS
+    geo = {"results": [{"name": "Lagos", "latitude": 6.4541, "longitude": 3.3947,
+                        "country_code": "NG"}]}
+    fc = {"daily": {"time": ["2026-06-20"], "temperature_2m_max": [33.0],
+                    "temperature_2m_min": [25.0], "precipitation_sum": [1.2]}}
+
+    def fake_get(url, *a, **k):
+        return _stub_response(geo if "geocoding" in url else fc)
+
+    monkeypatch.setattr(weather.httpx, "get", fake_get)
+    result = weather.fetch_weather_forecast("Will Lagos hit 35C on June 20?")
+    assert result["city"].lower().startswith("lagos")
+    assert result["source"] == "open-meteo"
+    assert result["forecast_days"]
+
+
+# --------------------------------------------------------------------------- #
 # weather.gov — secondary US source
 # --------------------------------------------------------------------------- #
 def _route_weather_get(geo, openmeteo, points, forecast, alerts):

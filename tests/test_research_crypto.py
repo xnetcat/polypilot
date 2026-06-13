@@ -2,6 +2,8 @@ import json
 import math
 from pathlib import Path
 
+import pytest
+
 import polymarket_mcp.research.crypto as crypto
 
 FIX = Path(__file__).parent / "fixtures"
@@ -92,10 +94,87 @@ def test_fetch_crypto_target_threshold(monkeypatch):
     assert result["target"]["direction"] == "above"
 
 
-def test_fetch_crypto_no_asset_returns_error():
+def test_fetch_crypto_no_asset_returns_error(monkeypatch):
     crypto._CACHE.clear()
+    # No alias and no price cue -> must NOT hit the network and must error out
+    # (guards against resolving an incidental proper noun like "Tokyo" to a coin).
+    monkeypatch.setattr(crypto.httpx, "get",
+                        lambda *a, **k: pytest.fail("no network call expected"))
     result = crypto.fetch_crypto("Will it rain in Tokyo tomorrow?")
     assert "error" in result
+
+
+# --- dynamic coin coverage (any listed coin, not just the alias subset) -----
+
+def _route_get(search_coins, price_payload):
+    """A fake httpx.get routing /search vs /simple/price by URL."""
+    def _get(url, *a, **k):
+        class R:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                if "/search" in url:
+                    return {"coins": search_coins}
+                return price_payload
+        return R()
+    return _get
+
+
+def test_fetch_crypto_resolves_non_alias_coin_via_search(monkeypatch):
+    # "Render" isn't in the alias map; with a price cue ($) it resolves through
+    # CoinGecko /search to render-token, then prices that id.
+    crypto._CACHE.clear()
+    monkeypatch.setattr(crypto.httpx, "get", _route_get(
+        search_coins=[{"id": "render-token", "symbol": "rndr", "name": "Render"}],
+        price_payload={"render-token": {"usd": 7.5, "usd_24h_change": 1.0, "usd_24h_vol": 9.0}},
+    ))
+    result = crypto.fetch_crypto("Will Render hit $20 by August?")
+    assert result["coin_id"] == "render-token"
+    assert result["symbol"] == "RNDR"
+    assert result["spot_usd"] == 7.5
+
+
+def test_dynamic_search_requires_price_cue(monkeypatch):
+    # Same proper noun, but no price/crypto cue -> dynamic search must NOT fire
+    # (no network), so it errors rather than matching a low-cap impostor coin.
+    crypto._CACHE.clear()
+    monkeypatch.setattr(crypto.httpx, "get",
+                        lambda *a, **k: pytest.fail("no /search expected without a price cue"))
+    result = crypto.fetch_crypto("Will Render win the design award?")
+    assert "error" in result
+
+
+def test_unknown_coin_search_empty_returns_error(monkeypatch):
+    # Price cue present but /search finds no coin -> graceful error, no crash.
+    crypto._CACHE.clear()
+    monkeypatch.setattr(crypto.httpx, "get", _route_get(
+        search_coins=[], price_payload={}))
+    result = crypto.fetch_crypto("Will Zzzqqx reach $5 in USD?")
+    assert "error" in result
+
+
+def test_alias_coin_skips_search_network(monkeypatch):
+    # A known alias ("Cardano"/ADA) must resolve WITHOUT any /search call.
+    crypto._CACHE.clear()
+
+    def _get(url, *a, **k):
+        if "/search" in url:
+            pytest.fail("alias coins must not trigger /search")
+
+        class R:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {"cardano": {"usd": 0.55, "usd_24h_change": -2.0, "usd_24h_vol": 3.0}}
+        return R()
+
+    monkeypatch.setattr(crypto.httpx, "get", _get)
+    result = crypto.fetch_crypto("Will Cardano be above $1 this year?")
+    assert result["coin_id"] == "cardano"
+    assert result["symbol"] == "ADA"
+    assert result["spot_usd"] == 0.55
 
 
 # --- band/threshold probability -------------------------------------------
