@@ -122,12 +122,13 @@ def test_breaker_tripped_not_in_schema_source(st):
 
 # --- get_performance_stats ---------------------------------------------------
 
-def _record_resolved(st, *, market_id, category, pnl, mode="paper"):
-    """Record an evaluation and immediately resolve it with the given pnl."""
+def _record_resolved(st, *, market_id, category, pnl, stake=0.0, mode="paper"):
+    """Record an evaluation with the given stake and immediately resolve it
+    with the given pnl."""
     st.record_evaluation(mode, market_id=market_id, question=f"q {market_id}",
                          category=category, keywords="k", decision="buy_yes",
                          side="YES", confidence=0.6, fair_prob=0.6,
-                         yes_price=0.5, thesis="t")
+                         yes_price=0.5, thesis="t", stake_usd=stake)
     side = "YES" if pnl > 0 else "NO"
     st.update_evaluation_outcome(mode, market_id, side,
                                  1.0 if pnl > 0 else 0.0, pnl)
@@ -138,7 +139,8 @@ def test_performance_stats_empty_returns_zeros(st):
     assert stats == {
         "overall": {
             "count": 0, "wins": 0, "losses": 0, "win_rate": 0.0,
-            "total_pnl": 0.0, "avg_pnl": 0.0, "roi": 0.0,
+            "total_pnl": 0.0, "avg_pnl": 0.0, "total_stake": 0.0,
+            "roi": 0.0, "pnl_turnover_ratio": 0.0,
         },
         "by_category": {},
     }
@@ -154,11 +156,13 @@ def test_performance_stats_unresolved_rows_are_ignored(st):
 
 
 def test_performance_stats_per_category_and_overall(st):
-    # weather: +20 (win), -5 (loss)  -> count 2, wins 1, total +15, |pnl| 25
-    # crypto:  +10 (win)             -> count 1, wins 1, total +10, |pnl| 10
-    _record_resolved(st, market_id="w1", category="weather", pnl=20.0)
-    _record_resolved(st, market_id="w2", category="weather", pnl=-5.0)
-    _record_resolved(st, market_id="c1", category="crypto", pnl=10.0)
+    # weather: +20 on $40 stake (win), -5 on $10 stake (loss)
+    #          -> count 2, wins 1, total +15, stake $50, ROI 15/50
+    # crypto:  +10 on $20 stake (win)
+    #          -> count 1, wins 1, total +10, stake $20, ROI 10/20
+    _record_resolved(st, market_id="w1", category="weather", pnl=20.0, stake=40.0)
+    _record_resolved(st, market_id="w2", category="weather", pnl=-5.0, stake=10.0)
+    _record_resolved(st, market_id="c1", category="crypto", pnl=10.0, stake=20.0)
 
     stats = st.get_performance_stats("paper")
 
@@ -169,7 +173,9 @@ def test_performance_stats_per_category_and_overall(st):
     assert weather["win_rate"] == 0.5
     assert weather["total_pnl"] == 15.0
     assert weather["avg_pnl"] == 7.5
-    assert weather["roi"] == round(15.0 / 25.0, 4)  # 0.6
+    assert weather["total_stake"] == 50.0
+    assert weather["roi"] == round(15.0 / 50.0, 4)  # 0.3 (stake-based)
+    assert weather["pnl_turnover_ratio"] == round(15.0 / 25.0, 4)  # legacy 0.6
 
     crypto = stats["by_category"]["crypto"]
     assert crypto["count"] == 1
@@ -177,7 +183,8 @@ def test_performance_stats_per_category_and_overall(st):
     assert crypto["losses"] == 0
     assert crypto["win_rate"] == 1.0
     assert crypto["total_pnl"] == 10.0
-    assert crypto["roi"] == 1.0  # all profit, no losing turnover
+    assert crypto["total_stake"] == 20.0
+    assert crypto["roi"] == 0.5  # +$10 on $20 staked
 
     overall = stats["overall"]
     assert overall["count"] == 3
@@ -186,11 +193,14 @@ def test_performance_stats_per_category_and_overall(st):
     assert overall["win_rate"] == round(2 / 3, 4)
     assert overall["total_pnl"] == 25.0
     assert overall["avg_pnl"] == round(25.0 / 3, 4)
-    assert overall["roi"] == round(25.0 / 35.0, 4)  # net 25 over |pnl| turnover 35
+    assert overall["total_stake"] == 70.0
+    assert overall["roi"] == round(25.0 / 70.0, 4)  # net 25 over $70 staked
+    assert overall["pnl_turnover_ratio"] == round(25.0 / 35.0, 4)  # legacy
 
 
 def test_performance_stats_zero_pnl_counts_as_loss(st):
     # "Win" is strictly pnl > 0, so a break-even (0.0) resolved row is a loss.
+    # Recorded with no stake, so the ROI denominator is 0 -> guarded ROI.
     _record_resolved(st, market_id="z1", category="weather", pnl=0.0)
     weather = st.get_performance_stats("paper")["by_category"]["weather"]
     assert weather["count"] == 1
@@ -198,7 +208,8 @@ def test_performance_stats_zero_pnl_counts_as_loss(st):
     assert weather["losses"] == 1
     assert weather["win_rate"] == 0.0
     assert weather["total_pnl"] == 0.0
-    assert weather["roi"] == 0.0  # zero turnover -> guarded ROI
+    assert weather["total_stake"] == 0.0
+    assert weather["roi"] == 0.0  # zero stake -> guarded ROI
 
 
 def test_performance_stats_category_filter(st):

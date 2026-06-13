@@ -141,15 +141,19 @@ def get_trade_history(mode: str | None = None, limit: int = 50) -> list[dict]:
 
 def record_evaluation(mode, *, market_id, question, category, keywords, decision,
                       side="", confidence=0.0, fair_prob=None, yes_price=0.0,
-                      thesis="") -> int:
+                      thesis="", stake_usd=0.0) -> int:
+    """Log a market evaluation. `stake_usd` is the $ committed to the trade (0
+    for skips / unsized evaluations); once the row resolves it becomes the ROI
+    denominator in get_performance_stats. Optional so existing callers stay
+    back-compatible (omitting it records 0.0)."""
     conn = db.connect(mode)
     try:
         cur = conn.execute(
             "INSERT INTO market_intelligence (market_id, question, category, keywords, "
-            "decision, side, confidence, fair_prob, yes_price, thesis, evaluated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            "decision, side, confidence, fair_prob, yes_price, stake_usd, thesis, "
+            "evaluated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
             (market_id, question, category, keywords, decision, side, confidence,
-             fair_prob, yes_price, thesis, time.time()))
+             fair_prob, yes_price, stake_usd, thesis, time.time()))
         conn.commit()
         return cur.lastrowid
     finally:
@@ -220,7 +224,9 @@ def _empty_stats_bucket() -> dict:
         "win_rate": 0.0,
         "total_pnl": 0.0,
         "avg_pnl": 0.0,
+        "total_stake": 0.0,
         "roi": 0.0,
+        "pnl_turnover_ratio": 0.0,
     }
 
 
@@ -229,7 +235,8 @@ def _finalize_bucket(b: dict) -> dict:
     JSON-serializable, no division by zero)."""
     count = b["count"]
     total_pnl = b["_total_pnl"]
-    turnover = b["_abs_pnl"]  # gross |PnL| transacted; ROI denominator
+    total_stake = b["_stake"]  # Σ stake_usd of staked rows; true ROI denominator
+    turnover = b["_abs_pnl"]   # gross |PnL| transacted; legacy stake-free ratio
     return {
         "count": count,
         "wins": b["wins"],
@@ -237,30 +244,37 @@ def _finalize_bucket(b: dict) -> dict:
         "win_rate": round(b["wins"] / count, 4) if count else 0.0,
         "total_pnl": round(total_pnl, 2),
         "avg_pnl": round(total_pnl / count, 4) if count else 0.0,
-        # ROI = net PnL relative to total absolute PnL turnover. The
-        # market_intelligence table records only realized pnl per resolved
-        # evaluation (no stake column), so this is the well-defined,
-        # stake-free measure of how efficiently risk turned into profit.
-        "roi": round(total_pnl / turnover, 4) if turnover else 0.0,
+        "total_stake": round(total_stake, 2),
+        # True ROI = net PnL relative to the capital actually staked. Only rows
+        # with a positive stake contribute to the denominator; zero-stake rows
+        # still count toward PnL/win-rate but can't define a return. Guarded so
+        # no staked capital -> roi 0.0.
+        "roi": round(total_pnl / total_stake, 4) if total_stake > 0 else 0.0,
+        # Legacy stake-free measure: net PnL over gross |PnL| turnover. Kept for
+        # transparency/back-compat now that `roi` is stake-based.
+        "pnl_turnover_ratio": round(total_pnl / turnover, 4) if turnover else 0.0,
     }
 
 
 def get_performance_stats(mode: str | None = None,
                           category: str | None = None) -> dict:
     """Aggregate RESOLVED evaluations in market_intelligence into win rate,
-    total/avg PnL, ROI, and counts, broken down by category plus an overall
-    bucket.
+    total/avg PnL, total stake, stake-based ROI, and counts, broken down by
+    category plus an overall bucket.
 
-    "Win" means pnl > 0. An optional `category` filter restricts which resolved
-    rows are considered (the overall bucket then reflects only that category).
-    Returns a JSON-serializable dict::
+    "Win" means pnl > 0. ROI is the *real* return on capital: total_pnl divided
+    by the summed stake_usd of resolved rows that carry a positive stake
+    (guarded to 0.0 when nothing was staked). `pnl_turnover_ratio` preserves the
+    older stake-free measure (net PnL over gross |PnL| turnover). An optional
+    `category` filter restricts which resolved rows are considered (the overall
+    bucket then reflects only that category). Returns a JSON-serializable dict::
 
         {"overall": {...}, "by_category": {"weather": {...}, ...}}
 
     Empty input yields zeroed buckets (no division by zero)."""
     conn = db.connect(mode or config.MODE)
     try:
-        sql = ("SELECT category, pnl FROM market_intelligence "
+        sql = ("SELECT category, pnl, stake_usd FROM market_intelligence "
                "WHERE resolved=1 AND pnl IS NOT NULL")
         params: tuple = ()
         if category is not None:
@@ -272,18 +286,23 @@ def get_performance_stats(mode: str | None = None,
 
     def _new_running() -> dict:
         return {"count": 0, "wins": 0, "losses": 0,
-                "_total_pnl": 0.0, "_abs_pnl": 0.0}
+                "_total_pnl": 0.0, "_abs_pnl": 0.0, "_stake": 0.0}
 
     overall = _new_running()
     by_cat: dict[str, dict] = {}
     for r in rows:
         pnl = r["pnl"]
+        # Only positive stakes form the ROI basis; legacy rows persisted before
+        # the stake column (or genuine zero-stake evaluations) contribute 0.
+        stake = r["stake_usd"] or 0.0
         cat = r["category"] or ""
         bucket = by_cat.setdefault(cat, _new_running())
         for b in (overall, bucket):
             b["count"] += 1
             b["_total_pnl"] += pnl
             b["_abs_pnl"] += abs(pnl)
+            if stake > 0:
+                b["_stake"] += stake
             if pnl > 0:
                 b["wins"] += 1
             else:

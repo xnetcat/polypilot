@@ -57,6 +57,7 @@ CREATE TABLE IF NOT EXISTS market_intelligence (
     confidence REAL NOT NULL DEFAULT 0,
     fair_prob REAL,
     yes_price REAL NOT NULL DEFAULT 0,
+    stake_usd REAL NOT NULL DEFAULT 0,  -- $ committed; ROI denominator when resolved
     thesis TEXT NOT NULL DEFAULT '',
     outcome_side TEXT NOT NULL DEFAULT '',
     resolution_price REAL,
