@@ -48,11 +48,24 @@ def notify(event: str, message: str, **fields) -> dict:
     return {"sent": any(c.get("ok") for c in channels), "channels": channels}
 
 
+def _is_discord(url: str) -> bool:
+    return "discord.com/api/webhooks" in url or "discordapp.com/api/webhooks" in url
+
+
 def _send_webhook(event: str, message: str, fields: dict) -> dict:
-    """POST a JSON ``{event, message, **fields}`` to the configured webhook."""
-    payload = {"event": event, "message": message, **fields}
+    """POST to the configured webhook. Discord webhooks require a ``{"content":
+    ...}`` payload, so those get a formatted text message; any other URL receives
+    the generic ``{event, message, **fields}`` JSON shape."""
+    url = config.POLYPILOT_WEBHOOK_URL
+    if _is_discord(url):
+        text = f"**[{event}]** {message}"
+        if fields:
+            text += "\n" + " ".join(f"{k}={v}" for k, v in fields.items())
+        payload = {"content": text[:1900]}   # Discord hard-caps content at 2000 chars
+    else:
+        payload = {"event": event, "message": message, **fields}
     try:
-        resp = httpx.post(config.POLYPILOT_WEBHOOK_URL, json=payload, timeout=10)
+        resp = httpx.post(url, json=payload, timeout=10)
         ok = 200 <= getattr(resp, "status_code", 0) < 300
         return {"channel": "webhook", "ok": ok,
                 "status_code": getattr(resp, "status_code", None)}
