@@ -36,7 +36,8 @@ Two halves ship in one plugin:
   in-session cycle (`reconcile → review → discover → screen → research → decide →
   trade → wait`) and ships per-category playbooks (weather, crypto, reading order
   books, exit doctrine) as *guidance*, never as gates. The agent runs this loop
-  until you stop it or the kill-switch trips.
+  until you stop it or the kill-switch trips. A one-shot variant (`/polypilot-cycle`)
+  runs a single cycle and stops, for scheduled/unattended trading.
 - **MCP server (`polypilot-mcp`)** — a [FastMCP](https://github.com/modelcontextprotocol/python-sdk)
   Python server exposing the tools below, backed by **SQLite** state (positions,
   trades, market intelligence, portfolio) with separate database files for paper
@@ -87,6 +88,59 @@ and waits before the next cycle. It keeps going until you stop it or the breaker
 trips. In **live** mode it prints a one-time real-money banner at startup — there
 is no per-trade confirmation, by design (that would break autonomy).
 
+## Unattended / scheduled mode
+
+For hands-off trading on a schedule, use the bundled **`/polypilot-cycle`** skill
+instead of the continuous `/polypilot` loop. It runs **exactly one** cycle —
+safety check → reconcile/review → discover → research → decide → trade → record
+evaluation (with stake) → report — and then **stops**, leaving the cadence to a
+scheduler. The doctrine, rules, kill-switch, and tools are identical to
+`/polypilot`; only the control flow differs (one pass, no `wait_for_next_cycle`,
+no loop).
+
+Drive it from Claude Code's `/schedule` or from cron — for example, a routine
+that runs every 30 minutes:
+
+```
+/schedule create "polypilot trading" --cron "*/30 * * * *" --prompt "/polypilot-cycle"
+```
+
+or via system cron invoking Claude Code headless:
+
+```cron
+*/30 * * * * cd /path/to/your/session && claude -p "/polypilot-cycle"
+```
+
+A kill-switch trip still halts the run: `/polypilot-cycle` reports it and exits
+without trading. Pair scheduled runs with **Notifications** (below) so fills and
+breaker trips reach you while you're away.
+
+## Notifications
+
+Polypilot can push alerts (fills, kill-switch trips) to an external channel,
+which is especially useful in unattended/scheduled mode. Configure either or both:
+
+| Variable | Description |
+|----------|-------------|
+| `POLYPILOT_WEBHOOK_URL` | Generic webhook URL; messages are POSTed to it. |
+| `POLYPILOT_TELEGRAM_BOT_TOKEN` | Telegram bot token (used with the chat id below). |
+| `POLYPILOT_TELEGRAM_CHAT_ID` | Telegram chat id to deliver messages to. |
+
+Behavior: the agent can call `send_notification` directly, and the server
+**auto-notifies** on order fills and on a kill-switch trip when a channel is
+configured. If nothing is configured, notifications are a no-op and never block
+trading.
+
+## Multi-outcome markets
+
+Markets are not always simple YES/NO. `list_markets` and `get_market` may return
+markets with `is_binary: false` and an `outcomes` list (e.g. a multi-candidate
+race). To trade one, the agent picks a specific outcome's `token_id`, estimates
+that outcome's fair probability, and treats it as a "YES on that token" — an
+outcome token pays $1 if its outcome wins — using
+`compute_edge(fair_prob, "YES", <token price>)` for edge math and passing the
+outcome label as the `side` to `place_order`.
+
 ## Paper vs live mode
 
 | Mode | How to enable | Behavior |
@@ -111,7 +165,7 @@ A single cumulative-loss circuit breaker is the one rule enforced in code:
 Everything else — strategy, edge bar, position sizing, concentration, and
 timing — is the agent's judgment, not hardcoded.
 
-## Tool surface (28 tools)
+## Tool surface (29 tools)
 
 Grouped by purpose. The agent calls what it needs; all tools return plain JSON.
 
@@ -156,6 +210,9 @@ Grouped by purpose. The agent calls what it needs; all tools return plain JSON.
 - `wait_for_next_cycle` — server-side sleep that paces the loop and may return early if a held position nears resolution.
 - `ping` — health check.
 
+**Notifications**
+- `send_notification` — push a message to the configured webhook and/or Telegram channel (e.g. a fill or a kill-switch alert). No-op when no channel is configured; never blocks trading.
+
 ## Environment variables
 
 Configure via environment variables or a `.env` file (see `.env.example`). The
@@ -173,6 +230,9 @@ Configure via environment variables or a `.env` file (see `.env.example`). The
 | `POLYMARKET_PROXY_ADDRESS` | _(empty)_ | Polymarket proxy/funder address for live trading. |
 | `POLYMARKET_SIGNATURE_TYPE` | `0` | CLOB signature type for live order signing. |
 | `POLYPILOT_HTTP_PROXY` | _(empty)_ | HTTP/HTTPS proxy for geo-restricted regions. |
+| `POLYPILOT_WEBHOOK_URL` | _(empty)_ | Generic webhook for notifications (fills, kill-switch). |
+| `POLYPILOT_TELEGRAM_BOT_TOKEN` | _(empty)_ | Telegram bot token for notifications (with chat id). |
+| `POLYPILOT_TELEGRAM_CHAT_ID` | _(empty)_ | Telegram chat id for notification delivery. |
 | `FRED_API_KEY` | _(empty)_ | Enables `get_economic_data` (official economy/finance data via FRED). |
 | `NEWSAPI_KEY` | _(empty)_ | Optional — broader news coverage in `get_news`. RSS works with no key. |
 

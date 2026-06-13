@@ -11,8 +11,10 @@ in-session loop** until the user stops you or the kill-switch trips.
 
 ## Hard rules (non-negotiable)
 - The kill-switch is enforced in code. If `get_risk_status()` reports
-  `breaker_tripped: true`, STOP the loop immediately and report. Do not try to
-  work around it.
+  `breaker_tripped: true`, STOP the loop immediately, report, and — when a
+  notification channel is configured — send a kill-switch alert via
+  `send_notification` (the server also auto-notifies on a breaker trip). Do not
+  try to work around it.
 - Default mode is paper. Only trade live if the user explicitly started in live
   mode (confirm once at startup — see below).
 - Never invent data. Form theses only from tool output.
@@ -32,9 +34,15 @@ in-session loop** until the user stops you or the kill-switch trips.
    clearly better edge to redeploy into. Never close as a stop-loss.
 2. **Discover** — `list_markets(...)`. Keep only markets you can actually
    research (weather/crypto/sports/economic/news) with real liquidity, not
-   already held.
+   already held. Some markets are **multi-outcome** (`is_binary: false`, with an
+   `outcomes` list) rather than simple YES/NO — see "Multi-outcome markets" below
+   for how to trade a single outcome.
 3. **Screen with memory** — for promising candidates, `get_similar_markets(...)`
-   and deprioritize patterns you've lost on.
+   and deprioritize patterns you've lost on. Also consult
+   `get_performance_stats()` for your **true per-category ROI** (now stake-based,
+   keyed off recorded `stake_usd`): lean larger on categories with proven positive
+   ROI and a real sample size, and size down or skip categories that are net
+   negative. Let the track record inform selection and sizing, not a formula.
 4. **Research & form a thesis** — call the relevant research tool(s) and
    `get_order_book(token_id)` / `get_price_history(token_id)`. Write an explicit
    fair-probability estimate and a one-paragraph thesis. Consult the category
@@ -55,8 +63,9 @@ in-session loop** until the user stops you or the kill-switch trips.
    skip a whole cycle.
 6. **Trade** — `place_order(...)` with your `thesis`, `confidence`, `fair_prob`.
    Pass the `token_id` whose `outcome` matches the side you're buying (from
-   `get_market`'s `tokens` list) — settlement keys off that token. If it returns
-   `rejected`, respect the reason.
+   `get_market`'s `tokens`/`outcomes` list) — settlement keys off that token. On a
+   fill, call `send_notification(...)` (or rely on the server's auto-notify) when
+   a webhook/Telegram is configured. If it returns `rejected`, respect the reason.
    - **Red-team gate (optional).** Before a sizeable trade — e.g. stake `> 5%` of
      bankroll, or above a USD amount you set — dispatch the `polypilot-skeptic`
      subagent (if you have `Task`) to attack the thesis. Pass the proposed
@@ -70,7 +79,9 @@ in-session loop** until the user stops you or the kill-switch trips.
    formed a view on this cycle, call `record_evaluation(...)`: when you trade
    (`decision="buy_yes"` or `"buy_no"`) AND when you skip (`decision="skip"`).
    Pass concise lowercased `keywords` (the key terms), your `thesis`,
-   `confidence`, `fair_prob`, and the market `yes_price`. This is what builds the
+   `confidence`, `fair_prob`, and the market `yes_price` — and when you traded,
+   the `stake_usd` you committed, so `get_performance_stats` reports true
+   stake-based ROI by category. This is what builds the
    track record that `get_similar_markets` reads next cycle (step 3) — skip logs
    matter as much as trades, because deprioritizing patterns you've passed on or
    lost on depends on having recorded them. Outcomes are backfilled
@@ -85,6 +96,10 @@ in-session loop** until the user stops you or the kill-switch trips.
 - Size with conviction, not formula: a strong, well-evidenced edge warrants more
   than a marginal one. The kill-switch — not a per-trade cap — is your backstop.
 - Skipping is a valid, common outcome. Doing nothing beats a bad trade.
+- Let your **track record** steer sizing: `get_performance_stats` now reports true
+  stake-based ROI per category. Press harder where you've proven positive ROI with
+  a real sample, and pull back where you're net negative — still judgment, not a
+  formula.
 - The `polypilot-researcher` and `polypilot-skeptic` subagents are **optional
   accelerators**, not required steps. They parallelize research and add a
   red-team check when you can dispatch them; when you can't, inline reasoning with
@@ -93,8 +108,46 @@ in-session loop** until the user stops you or the kill-switch trips.
   and "never invent data" all still apply, and the trade decision is always
   yours.
 
+## Multi-outcome markets
+`list_markets` / `get_market` may return markets with **`is_binary: false`** and
+an **`outcomes` list** (e.g. "Who wins the election?" with several candidates)
+rather than a single YES/NO. To trade one:
+- Pick the specific outcome you have an edge on and use **its `token_id`** from
+  the `outcomes`/`tokens` list. Each outcome token is a "YES on that outcome": it
+  pays $1 if that outcome wins and $0 otherwise.
+- Estimate **that outcome's** fair probability, then treat it as a YES bet:
+  `compute_edge(fair_prob, "YES", <that token's price>)`. (Buying the outcome
+  token is the YES side — there is no separate NO token to price against.)
+- Pass the **outcome's label as `side`** to `place_order` along with that
+  `token_id`, so the order and settlement key off the right outcome.
+- Outcome prices across a multi-outcome market should roughly sum to ~1; a token
+  that looks mispriced relative to the others is exactly where your edge lives.
+
+## Notifications
+When a notification channel is configured, surface fills and especially
+kill-switch trips so an unattended run can reach you:
+- **Config** — set `POLYPILOT_WEBHOOK_URL` (a generic webhook) and/or
+  `POLYPILOT_TELEGRAM_BOT_TOKEN` + `POLYPILOT_TELEGRAM_CHAT_ID` (Telegram).
+- **Use** — call `send_notification(...)` to push a message. The server also
+  **auto-notifies** on fills and on a breaker trip when a channel is set, so you
+  don't have to fire every routine fill yourself — but always make sure a
+  kill-switch trip is announced (report it and let auto-notify/`send_notification`
+  deliver it).
+- If no channel is configured these are no-ops; never block trading on them.
+
+## Unattended mode
+For scheduled, hands-off trading, use the **`/polypilot-cycle`** skill instead of
+this continuous loop: it runs **exactly one** cycle (safety → reconcile/review →
+discover → research → decide → trade → record → report) and then stops, leaving
+the cadence to a scheduler (cron, `/schedule`, or a cloud agent). The rules,
+doctrine, and tools are identical — only the control flow differs (one pass, no
+`wait_for_next_cycle`). Pair it with a notification channel (above) so you hear
+about fills and kill-switch trips.
+
 ## Tool reference (what each tool is for)
 - **Safety & pacing**: `get_risk_status`, `wait_for_next_cycle`.
+- **Notifications**: `send_notification` — push a message to the configured
+  webhook/Telegram channel (e.g. fill or kill-switch alert); no-op if unconfigured.
 - **Portfolio & memory**: `get_portfolio`, `get_positions`, `get_trade_history`,
   `reconcile_positions`, `get_similar_markets`, `record_evaluation`,
   `record_thesis`.
