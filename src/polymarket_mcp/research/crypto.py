@@ -12,10 +12,14 @@ import re
 
 import httpx
 
+from ._cache import _MISS, DEFAULT_TTL_SECONDS, cache_get, cache_set
+
 log = logging.getLogger(__name__)
 
-# Simple in-process cache keyed by question text.
-_CACHE: dict[str, dict | None] = {}
+# Simple in-process cache keyed by question text, with a time-based TTL so a
+# long-running loop re-pulls fresh spot prices (see ._cache).
+CACHE_TTL_SECONDS: float = DEFAULT_TTL_SECONDS
+_CACHE: dict[str, tuple[float, dict | None]] = {}
 
 _COINS = {
     "bitcoin": "bitcoin",
@@ -45,8 +49,9 @@ def _maybe_prediction(symbol: str) -> dict | None:
 
 
 def _get_crypto_research(question: str) -> dict | None:
-    if question in _CACHE:
-        return _CACHE[question]
+    cached = cache_get(_CACHE, question, CACHE_TTL_SECONDS)
+    if cached is not _MISS:
+        return cached
     q = question.lower()
     coin_id = None
     matched_keyword = ""
@@ -100,7 +105,7 @@ def _get_crypto_research(question: str) -> dict | None:
             result["market_type"] = "threshold"
         else:
             result["market_type"] = "other"
-        _CACHE[question] = result
+        cache_set(_CACHE, question, result)
         return result
     except Exception as e:
         log.debug("[research] Crypto fetch error: %s", e)

@@ -11,10 +11,14 @@ from datetime import datetime, timedelta, timezone
 
 import httpx
 
+from ._cache import _MISS, DEFAULT_TTL_SECONDS, cache_get, cache_set
+
 log = logging.getLogger(__name__)
 
-# Simple in-process cache keyed by question text.
-_CACHE: dict[str, dict | None] = {}
+# Simple in-process cache keyed by question text, with a time-based TTL so a
+# long-running loop re-pulls fresh ESPN scoreboards (see ._cache).
+CACHE_TTL_SECONDS: float = DEFAULT_TTL_SECONDS
+_CACHE: dict[str, tuple[float, dict | None]] = {}
 
 _ESPN_SPORTS = {
     "nba": "basketball/nba",
@@ -96,22 +100,86 @@ def _detect_sport(question: str) -> str | None:
     return None
 
 
+# Trailing words that are noise for ESPN team matching: time references and
+# generic game words that frequently trail a team name in market questions
+# ("...beat the Celtics tonight", "Lakers game"). Kept deliberately small and
+# conservative so real team names are never truncated.
+_TEAM_TRAILING_NOISE = {
+    "tonight",
+    "today",
+    "tomorrow",
+    "game",
+    "match",
+}
+
+
+def _normalize_team_name(name: str, *, strip_article: bool = True) -> str:
+    """Normalize a raw extracted team name to reduce ESPN-matching noise.
+
+    Conservatively trims obvious noise only:
+      * strips trailing punctuation and surrounding whitespace,
+      * collapses internal whitespace,
+      * strips trailing time/filler words ("tonight", "today", "tomorrow",
+        "game", "match"), possibly several in a row,
+      * and (when ``strip_article`` is true) strips a leading article
+        ("the Lakers" -> "Lakers").
+
+    A clean "Team A vs Team B" name is returned unchanged. The trim is bounded
+    to the known noise set, so multi-word team names ("Maple Leafs",
+    "Trail Blazers") are preserved.
+
+    ``strip_article`` is split out because the public extractor keeps the
+    leading article in its returned display name (callers/tests rely on the raw
+    "the Lakers" form), while the ESPN lookup uses ``strip_article=True`` so the
+    6-char prefix match keys on the real team name rather than "the La".
+    """
+    # Collapse whitespace and strip surrounding punctuation/spaces first.
+    cleaned = re.sub(r"\s+", " ", name).strip().strip(".,!?;:").strip()
+
+    if strip_article:
+        # Strip a single leading article.
+        cleaned = re.sub(r"^(?:the|a|an)\s+", "", cleaned, flags=re.IGNORECASE)
+
+    # Peel trailing noise words (and any punctuation between them) one at a time.
+    while True:
+        tokens = cleaned.split()
+        if not tokens:
+            break
+        last = tokens[-1].strip(".,!?;:").lower()
+        if last in _TEAM_TRAILING_NOISE:
+            cleaned = " ".join(tokens[:-1]).strip().strip(".,!?;:").strip()
+            continue
+        break
+
+    return cleaned
+
+
 def _extract_teams_from_question(question: str) -> tuple[str, str] | None:
-    """Extract two team names from a sports question. Handles 'vs', 'beat', etc."""
+    """Extract two team names from a sports question. Handles 'vs', 'beat', etc.
+
+    Extracted names are run through ``_normalize_team_name`` to strip trailing
+    time/filler noise ("tonight", "game", ...) and surrounding punctuation that
+    hurts ESPN matching, while leaving clean "Team A vs Team B" names intact.
+    The leading article is preserved in the returned display name; it is
+    stripped only for the ESPN match keys (see ``_get_espn_score_data``).
+    """
+    def _norm(value: str) -> str:
+        return _normalize_team_name(value, strip_article=False)
+
     vs_match = re.search(r"(.+?)\s+vs\.?\s+(.+?)(?::|$|\?)", question)
     if vs_match:
-        return vs_match.group(1).strip(), vs_match.group(2).strip()
+        return _norm(vs_match.group(1)), _norm(vs_match.group(2))
     beat_match = re.search(
         r"[Ww]ill\s+(.+?)\s+(?:beat|defeat|win against)\s+(.+?)(?:\?|$|:| in )", question
     )
     if beat_match:
-        return beat_match.group(1).strip(), beat_match.group(2).strip()
+        return _norm(beat_match.group(1)), _norm(beat_match.group(2))
     win_match = re.search(r"[Ww]ill\s+(.+?)\s+win\b", question)
     if win_match:
-        return win_match.group(1).strip(), ""
+        return _norm(win_match.group(1)), ""
     draw_match = re.search(r"(.+?)\s+vs\.?\s+(.+?):", question)
     if draw_match:
-        return draw_match.group(1).strip(), draw_match.group(2).strip()
+        return _norm(draw_match.group(1)), _norm(draw_match.group(2))
     return None
 
 
@@ -146,8 +214,10 @@ def _get_espn_score_data(team1: str, team2: str, question: str) -> dict | None:
         if not all_events:
             return None
 
-        t1_lower = team1.lower()
-        t2_lower = team2.lower() if team2 else ""
+        # Strip the leading article for the prefix match so "the Lakers" keys on
+        # "lakers" rather than "the La" (which would never hit the ESPN name).
+        t1_lower = _normalize_team_name(team1, strip_article=True).lower()
+        t2_lower = _normalize_team_name(team2, strip_article=True).lower() if team2 else ""
         for event in all_events:
             name = event.get("name", "").lower()
             short_name = event.get("shortName", "").lower()
@@ -217,8 +287,9 @@ def _format_espn_score_data(score_data: dict | None) -> str:
 
 
 def _get_sports_research(question: str) -> dict | None:
-    if question in _CACHE:
-        return _CACHE[question]
+    cached = cache_get(_CACHE, question, CACHE_TTL_SECONDS)
+    if cached is not _MISS:
+        return cached
     teams = _extract_teams_from_question(question)
     if not teams:
         log.debug("[research] Could not extract teams from: %s", question[:80])
@@ -239,7 +310,7 @@ def _get_sports_research(question: str) -> dict | None:
         "espn_data": score_data,
         "espn_summary": _format_espn_score_data(score_data) if score_data else "",
     }
-    _CACHE[question] = result
+    cache_set(_CACHE, question, result)
     return result
 
 

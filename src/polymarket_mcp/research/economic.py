@@ -11,11 +11,14 @@ import re
 import httpx
 
 from .. import config
+from ._cache import _MISS, DEFAULT_TTL_SECONDS, cache_get, cache_set
 
 log = logging.getLogger(__name__)
 
-# Simple in-process cache keyed by question text.
-_CACHE: dict[str, dict | None] = {}
+# Simple in-process cache keyed by question text, with a time-based TTL so a
+# long-running loop re-pulls fresh FRED observations (see ._cache).
+CACHE_TTL_SECONDS: float = DEFAULT_TTL_SECONDS
+_CACHE: dict[str, tuple[float, dict | None]] = {}
 
 _FRED_SERIES = [
     {
@@ -92,8 +95,9 @@ def _extract_numeric_target(question: str) -> float | None:
 
 
 def _get_macro_research(question: str) -> dict | None:
-    if question in _CACHE:
-        return _CACHE[question]
+    cached = cache_get(_CACHE, question, CACHE_TTL_SECONDS)
+    if cached is not _MISS:
+        return cached
     if not config.FRED_API_KEY:
         return None
     series = _detect_macro_series(question)
@@ -152,7 +156,7 @@ def _get_macro_research(question: str) -> dict | None:
                 result["threshold_direction"] = "above"
             elif "below" in question_lower or "under" in question_lower:
                 result["threshold_direction"] = "below"
-        _CACHE[question] = result
+        cache_set(_CACHE, question, result)
         return result
     except Exception as exc:
         log.debug("[research] FRED fetch error for %s: %s", series["series_id"], exc)

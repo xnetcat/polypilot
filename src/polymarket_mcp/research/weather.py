@@ -11,11 +11,17 @@ from datetime import datetime
 
 import httpx
 
+from ._cache import _MISS, DEFAULT_TTL_SECONDS, cache_get, cache_set
+
 log = logging.getLogger(__name__)
 
-# Simple in-process caches (no config TTL coupling in the new package).
-_CACHE: dict[str, dict | None] = {}
-_GEOCODE_CACHE: dict[str, tuple[str, tuple[float, float], bool, str] | None] = {}
+# Simple in-process caches with a time-based TTL (see ._cache). Stamped values
+# expire after CACHE_TTL_SECONDS so a long-running loop re-pulls fresh data.
+CACHE_TTL_SECONDS: float = DEFAULT_TTL_SECONDS
+_CACHE: dict[str, tuple[float, dict | None]] = {}
+_GEOCODE_CACHE: dict[
+    str, tuple[float, tuple[str, tuple[float, float], bool, str] | None]
+] = {}
 
 # Mapping of city names to coordinates for Open-Meteo.
 CITY_COORDS = {
@@ -206,8 +212,9 @@ def _lookup_city_location(
         return None
     if normalized in CITY_COORDS:
         return normalized, CITY_COORDS[normalized], normalized in _US_CITIES, "catalog"
-    if normalized in _GEOCODE_CACHE:
-        return _GEOCODE_CACHE[normalized]
+    cached = cache_get(_GEOCODE_CACHE, normalized, CACHE_TTL_SECONDS)
+    if cached is not _MISS:
+        return cached
 
     try:
         response = httpx.get(
@@ -218,7 +225,7 @@ def _lookup_city_location(
         response.raise_for_status()
         results = response.json().get("results", [])
         if not results:
-            _GEOCODE_CACHE[normalized] = None
+            cache_set(_GEOCODE_CACHE, normalized, None)
             return None
 
         result = results[0]
@@ -229,17 +236,18 @@ def _lookup_city_location(
         is_us = str(result.get("country_code", "")).upper() == "US"
         payload = (canonical_city, coords, is_us, "open-meteo-geocoding")
         CITY_COORDS.setdefault(canonical_city, coords)
-        _GEOCODE_CACHE[normalized] = payload
+        cache_set(_GEOCODE_CACHE, normalized, payload)
         return payload
     except Exception as exc:
         log.debug("[research] Geocoding error for %s: %s", city, exc)
-        _GEOCODE_CACHE[normalized] = None
+        cache_set(_GEOCODE_CACHE, normalized, None)
         return None
 
 
 def _get_weather_research(question: str) -> dict | None:
-    if question in _CACHE:
-        return _CACHE[question]
+    cached = cache_get(_CACHE, question, CACHE_TTL_SECONDS)
+    if cached is not _MISS:
+        return cached
     city = _extract_city(question)
     if not city:
         return None
@@ -322,7 +330,7 @@ def _get_weather_research(question: str) -> dict | None:
                     else:
                         result["target_in_range"] = False
                         result["target_range_distance_c"] = round(forecast_high - float(high_c), 3)
-        _CACHE[question] = result
+        cache_set(_CACHE, question, result)
         return result
     except Exception as e:
         log.debug("[research] Weather fetch error for %s: %s", city, e)
