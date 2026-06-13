@@ -21,7 +21,7 @@ def test_fetch_crypto_returns_spot(monkeypatch):
     result = crypto.fetch_crypto("Will Bitcoin be above $70k?")
     assert result["symbol"] in ("BTC", "bitcoin")
     assert result["spot_usd"] > 0
-    # _maybe_prediction must swallow the missing crypto_model import and omit it.
+    # Crypto research has no ML prediction; the key must never be present.
     assert "prediction" not in result
 
 

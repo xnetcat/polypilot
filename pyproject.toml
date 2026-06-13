@@ -13,7 +13,6 @@ dependencies = [
 
 [project.optional-dependencies]
 trade = ["py-clob-client>=0.18.0"]
-ml = ["torch>=2.0.0", "chronos-forecasting>=2.0.0"]
 
 [project.scripts]
 polypilot-mcp = "polymarket_mcp.server:main"
