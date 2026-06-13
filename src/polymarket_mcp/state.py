@@ -28,16 +28,26 @@ def get_portfolio(mode: str | None = None) -> dict:
         open_rows = conn.execute(
             "SELECT COUNT(*) c, COALESCE(SUM(size_usd),0) exp "
             "FROM positions WHERE status='open'").fetchone()
+        # The kill-switch is a function of realized PnL, not a stored flag, so
+        # compute breaker_tripped live to keep this view honest. This mirrors
+        # risk.check_kill_switch's comparison; risk.py stays the canonical
+        # breaker but we inline the tiny check here to avoid a circular import.
+        realized_pnl = ps["realized_pnl"]
+        day_realized_pnl = ps["day_realized_pnl"]
+        breaker_tripped = (
+            -realized_pnl >= config.KILL_SWITCH_TOTAL_USD
+            or -day_realized_pnl >= config.KILL_SWITCH_DAILY_USD
+        )
         return {
             "mode": ps["mode"],
             "cash": round(ps["cash"], 2),
             "starting_balance": ps["starting_balance"],
-            "realized_pnl": round(ps["realized_pnl"], 2),
+            "realized_pnl": round(realized_pnl, 2),
             "trade_count": ps["trade_count"],
             "open_positions": open_rows["c"],
             "open_exposure_usd": round(open_rows["exp"], 2),
-            "day_realized_pnl": round(ps["day_realized_pnl"], 2),
-            "breaker_tripped": bool(ps["breaker_tripped"]),
+            "day_realized_pnl": round(day_realized_pnl, 2),
+            "breaker_tripped": breaker_tripped,
         }
     finally:
         conn.close()
@@ -200,3 +210,87 @@ def get_similar_markets(mode, text: str, limit: int = 5) -> list[dict]:
             scored.append((overlap, dict(r)))
     scored.sort(key=lambda x: x[0], reverse=True)
     return [d for _, d in scored[:limit]]
+
+
+def _empty_stats_bucket() -> dict:
+    return {
+        "count": 0,
+        "wins": 0,
+        "losses": 0,
+        "win_rate": 0.0,
+        "total_pnl": 0.0,
+        "avg_pnl": 0.0,
+        "roi": 0.0,
+    }
+
+
+def _finalize_bucket(b: dict) -> dict:
+    """Turn running sums in a bucket into the reported stats (rounded,
+    JSON-serializable, no division by zero)."""
+    count = b["count"]
+    total_pnl = b["_total_pnl"]
+    turnover = b["_abs_pnl"]  # gross |PnL| transacted; ROI denominator
+    return {
+        "count": count,
+        "wins": b["wins"],
+        "losses": b["losses"],
+        "win_rate": round(b["wins"] / count, 4) if count else 0.0,
+        "total_pnl": round(total_pnl, 2),
+        "avg_pnl": round(total_pnl / count, 4) if count else 0.0,
+        # ROI = net PnL relative to total absolute PnL turnover. The
+        # market_intelligence table records only realized pnl per resolved
+        # evaluation (no stake column), so this is the well-defined,
+        # stake-free measure of how efficiently risk turned into profit.
+        "roi": round(total_pnl / turnover, 4) if turnover else 0.0,
+    }
+
+
+def get_performance_stats(mode: str | None = None,
+                          category: str | None = None) -> dict:
+    """Aggregate RESOLVED evaluations in market_intelligence into win rate,
+    total/avg PnL, ROI, and counts, broken down by category plus an overall
+    bucket.
+
+    "Win" means pnl > 0. An optional `category` filter restricts which resolved
+    rows are considered (the overall bucket then reflects only that category).
+    Returns a JSON-serializable dict::
+
+        {"overall": {...}, "by_category": {"weather": {...}, ...}}
+
+    Empty input yields zeroed buckets (no division by zero)."""
+    conn = db.connect(mode or config.MODE)
+    try:
+        sql = ("SELECT category, pnl FROM market_intelligence "
+               "WHERE resolved=1 AND pnl IS NOT NULL")
+        params: tuple = ()
+        if category is not None:
+            sql += " AND category=?"
+            params = (category,)
+        rows = conn.execute(sql, params).fetchall()
+    finally:
+        conn.close()
+
+    def _new_running() -> dict:
+        return {"count": 0, "wins": 0, "losses": 0,
+                "_total_pnl": 0.0, "_abs_pnl": 0.0}
+
+    overall = _new_running()
+    by_cat: dict[str, dict] = {}
+    for r in rows:
+        pnl = r["pnl"]
+        cat = r["category"] or ""
+        bucket = by_cat.setdefault(cat, _new_running())
+        for b in (overall, bucket):
+            b["count"] += 1
+            b["_total_pnl"] += pnl
+            b["_abs_pnl"] += abs(pnl)
+            if pnl > 0:
+                b["wins"] += 1
+            else:
+                b["losses"] += 1
+
+    return {
+        "overall": _finalize_bucket(overall) if overall["count"]
+        else _empty_stats_bucket(),
+        "by_category": {c: _finalize_bucket(b) for c, b in by_cat.items()},
+    }

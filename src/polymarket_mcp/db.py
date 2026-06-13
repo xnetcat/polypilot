@@ -74,8 +74,7 @@ CREATE TABLE IF NOT EXISTS portfolio_state (
     realized_pnl REAL NOT NULL DEFAULT 0,
     trade_count INTEGER NOT NULL DEFAULT 0,
     day_date TEXT NOT NULL DEFAULT '',
-    day_realized_pnl REAL NOT NULL DEFAULT 0,
-    breaker_tripped INTEGER NOT NULL DEFAULT 0
+    day_realized_pnl REAL NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status);
