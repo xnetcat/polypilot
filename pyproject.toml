@@ -1,0 +1,29 @@
+[project]
+name = "polypilot-mcp"
+version = "0.1.0"
+description = "Polypilot — MCP server for autonomous Polymarket trading"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "mcp>=1.2.0",
+    "httpx>=0.27.0",
+    "python-dotenv>=1.0.0",
+    "feedparser>=6.0.0",
+]
+
+[project.optional-dependencies]
+trade = ["py-clob-client>=0.18.0"]
+ml = ["torch>=2.0.0", "chronos-forecasting>=2.0.0"]
+
+[project.scripts]
+polypilot-mcp = "polymarket_mcp.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/polymarket_mcp"]
+
+[dependency-groups]
+dev = ["pytest>=8.0.0", "respx>=0.21.0"]
