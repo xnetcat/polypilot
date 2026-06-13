@@ -6,6 +6,7 @@ from mcp.server.fastmcp import FastMCP
 from . import analytics as _analytics
 from . import execution as _execution
 from . import markets as _markets
+from . import notifications as _notifications
 from . import order_book as _order_book
 from . import pacing as _pacing
 from . import risk as _risk
@@ -30,13 +31,20 @@ def ping() -> dict:
 
 @mcp.tool()
 def list_markets(limit: int = 50, category: str | None = None,
-                 min_volume: float = 0.0, keyword: str | None = None) -> dict:
-    """Discover active, binary Polymarket markets sorted by volume.
-    Optionally filter by category (e.g. 'weather','crypto','sports'), minimum
-    USD volume, or a keyword in the question. Returns a list of market dicts."""
+                 min_volume: float = 0.0, keyword: str | None = None,
+                 binary_only: bool = False) -> dict:
+    """Discover active Polymarket markets sorted by volume — binary (YES/NO) AND
+    multi-outcome by default. Each market dict carries `is_binary` plus an
+    `outcomes` list ([{outcome, token_id, price}, ...]) so multi-outcome data
+    flows through automatically. Optionally filter by category (e.g.
+    'weather','crypto','sports'), minimum USD volume, or a keyword in the
+    question. Set `binary_only=True` to return only YES/NO markets. Returns a
+    list of market dicts."""
     found = _markets.fetch_active_markets(limit=max(limit, 50))
     out = []
     for m in found:
+        if binary_only and not m.is_binary:
+            continue
         if category and m.category != category:
             continue
         if m.volume < min_volume:
@@ -312,18 +320,34 @@ def get_similar_markets(keywords: str, limit: int = 5) -> dict:
 def record_evaluation(market_id: str, question: str, category: str,
                       keywords: str, decision: str, side: str = "",
                       confidence: float = 0.0, fair_prob: float | None = None,
-                      yes_price: float = 0.0, thesis: str = "") -> dict:
+                      yes_price: float = 0.0, thesis: str = "",
+                      stake_usd: float = 0.0) -> dict:
     """Log the view you formed on a market this cycle — for EVERY market you
     evaluated, whether you traded it or skipped it. `decision` is one of
     'buy_yes' | 'buy_no' | 'skip'. Pass concise lowercased `keywords`, your
-    `thesis`, `confidence`, `fair_prob`, and the market `yes_price`. This is what
-    builds the track record that get_similar_markets reads next cycle; outcomes
-    are backfilled automatically when the market resolves."""
+    `thesis`, `confidence`, `fair_prob`, and the market `yes_price`. Pass
+    `stake_usd` — the $ you committed to the trade (0 for skips/unsized) — so the
+    stake-based ROI in get_performance_stats has a denominator once the market
+    resolves. This is what builds the track record that get_similar_markets reads
+    next cycle; outcomes are backfilled automatically when the market resolves."""
     row_id = _state.record_evaluation(_state.config.MODE, market_id=market_id,
         question=question, category=category, keywords=keywords,
         decision=decision, side=side, confidence=confidence, fair_prob=fair_prob,
-        yes_price=yes_price, thesis=thesis)
+        yes_price=yes_price, thesis=thesis, stake_usd=stake_usd)
     return {"status": "ok", "id": row_id}
+
+
+# --- Notifications ---
+
+
+@mcp.tool()
+def send_notification(event: str, message: str) -> dict:
+    """Send a best-effort outbound notification (webhook and/or Telegram) tagged
+    with `event`. STRICT NO-OP when no channel is configured: returns
+    {'sent': False, 'reason': 'no channel configured'} and makes NO network call.
+    Never raises — transport errors are captured per-channel. Use to alert on
+    fills, kill-switch trips, or end-of-cycle summaries."""
+    return _notifications.notify(event, message)
 
 
 # --- Pacing ---

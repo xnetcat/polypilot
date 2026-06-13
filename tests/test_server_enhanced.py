@@ -192,3 +192,97 @@ def test_preflight_live_shape_no_key(srv, monkeypatch):
     assert out["ok"] is False
     assert "private_key_set" in out["checks"]
     assert out["checks"]["private_key_set"] is False
+
+
+# --------------------------------------------------------------------------- #
+# send_notification wrapper
+# --------------------------------------------------------------------------- #
+def test_send_notification_no_op_when_unconfigured(srv):
+    # No webhook / Telegram configured -> strict no-op, no network, no raise.
+    out = srv.send_notification("fill", "bought YES on m1")
+    assert out == {"sent": False, "reason": "no channel configured"}
+
+
+def test_send_notification_forwards_event_and_message(srv, monkeypatch):
+    captured = {}
+
+    def fake_notify(event, message, **fields):
+        captured["event"] = event
+        captured["message"] = message
+        return {"sent": True, "channels": [{"channel": "webhook", "ok": True}]}
+
+    monkeypatch.setattr(srv._notifications, "notify", fake_notify)
+    out = srv.send_notification("kill_switch", "breaker tripped")
+    assert captured == {"event": "kill_switch", "message": "breaker tripped"}
+    assert out["sent"] is True
+
+
+# --------------------------------------------------------------------------- #
+# record_evaluation tool forwards stake_usd
+# --------------------------------------------------------------------------- #
+def test_record_evaluation_persists_stake_usd(srv):
+    # Record with a stake, then read the row back from the DB directly.
+    out = srv.record_evaluation(market_id="m1", question="Q", category="crypto",
+        keywords="btc", decision="buy_yes", side="YES", confidence=0.7,
+        fair_prob=0.62, yes_price=0.55, thesis="momentum", stake_usd=25.0)
+    assert out["status"] == "ok"
+    conn = srv._state.db.connect("paper")
+    try:
+        row = conn.execute(
+            "SELECT stake_usd FROM market_intelligence WHERE id=?",
+            (out["id"],)).fetchone()
+    finally:
+        conn.close()
+    assert row["stake_usd"] == 25.0
+
+
+def test_record_evaluation_stake_drives_roi(srv):
+    # End-to-end: record a staked evaluation, resolve it with a profit, and
+    # confirm get_performance_stats reports stake-based ROI (pnl / stake).
+    out = srv.record_evaluation(market_id="m1", question="Q", category="crypto",
+        keywords="btc", decision="buy_yes", side="YES", confidence=0.7,
+        fair_prob=0.62, yes_price=0.55, thesis="momentum", stake_usd=20.0)
+    assert out["status"] == "ok"
+    # Resolve the row with +10 PnL on a 20 stake -> ROI 0.5.
+    srv._state.update_evaluation_outcome("paper", "m1", "YES", 1.0, 10.0)
+    stats = srv.get_performance_stats()
+    assert stats["overall"]["total_stake"] == 20.0
+    assert stats["overall"]["roi"] == 0.5
+
+
+# --------------------------------------------------------------------------- #
+# list_markets binary_only filter
+# --------------------------------------------------------------------------- #
+def test_list_markets_binary_only_filters_multi_outcome(srv, monkeypatch):
+    binary = Market(
+        condition_id="b1", question="Will BTC top 100k?", category="crypto",
+        yes_price=0.6, no_price=0.4, volume=5000.0, end_date="2026-12-31",
+        active=True,
+        tokens=[{"token_id": "tY", "outcome": "Yes", "price": 0.6},
+                {"token_id": "tN", "outcome": "No", "price": 0.4}],
+        is_binary=True)
+    multi = Market(
+        condition_id="m1", question="Who wins the cup?", category="sports",
+        yes_price=0.5, no_price=0.5, volume=9000.0, end_date="2026-12-31",
+        active=True,
+        tokens=[{"token_id": "tA", "outcome": "Team A", "price": 0.5},
+                {"token_id": "tB", "outcome": "Team B", "price": 0.3},
+                {"token_id": "tC", "outcome": "Team C", "price": 0.2}],
+        is_binary=False)
+    monkeypatch.setattr(srv._markets, "fetch_active_markets",
+                        lambda *a, **k: [multi, binary])
+
+    # Default: both markets returned, multi-outcome data flows via `outcomes`.
+    all_out = srv.list_markets()
+    ids = {m["market_id"] for m in all_out["markets"]}
+    assert ids == {"b1", "m1"}
+    multi_dict = next(m for m in all_out["markets"] if m["market_id"] == "m1")
+    assert multi_dict["is_binary"] is False
+    assert len(multi_dict["outcomes"]) == 3
+    assert {o["outcome"] for o in multi_dict["outcomes"]} == {"Team A", "Team B", "Team C"}
+
+    # binary_only=True: the multi-outcome market is filtered out.
+    bin_out = srv.list_markets(binary_only=True)
+    assert bin_out["count"] == 1
+    assert bin_out["markets"][0]["market_id"] == "b1"
+    assert bin_out["markets"][0]["is_binary"] is True
