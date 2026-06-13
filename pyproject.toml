@@ -12,7 +12,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-trade = ["py-clob-client>=0.18.0"]
+# Polymarket CLOB V2 client. The legacy py-clob-client (v1) signs orders with the
+# old EIP-712 domain version "1" and is rejected by production CLOB V2 with
+# "invalid order version"; py-clob-client-v2 signs the V2 order struct.
+trade = ["py-clob-client-v2>=1.0.1"]
 
 [project.scripts]
 polypilot-mcp = "polymarket_mcp.server:main"

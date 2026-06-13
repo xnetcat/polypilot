@@ -214,17 +214,17 @@ def _get_clob_client():
     # via a module-global httpx client, so we replace it with a proxied one.
     if config.HTTP_PROXY:
         try:
-            import py_clob_client.http_helpers.helpers as _helpers
+            import py_clob_client_v2.http_helpers.helpers as _helpers
             import httpx as _httpx
             _helpers._http_client = _httpx.Client(http2=True, proxy=config.HTTP_PROXY)
         except Exception:
             pass
-    from py_clob_client.client import ClobClient
+    from py_clob_client_v2.client import ClobClient
     client = ClobClient(host=config.POLYMARKET_HOST,
                         key=config.POLYMARKET_PRIVATE_KEY, chain_id=137,
                         signature_type=config.POLYMARKET_SIGNATURE_TYPE,
                         funder=config.POLYMARKET_PROXY_ADDRESS or None)
-    client.set_api_creds(client.create_or_derive_api_creds())
+    client.set_api_creds(client.create_or_derive_api_key())
     _clob_client = client
     return client
 
@@ -253,10 +253,11 @@ def _live_fill(market_id, token_id, question, category, side, size_usd,
         return _live_limit_fill(market_id, token_id, question, category, side,
                                 size_usd, fair_prob, confidence, thesis,
                                 limit_price)
-    from py_clob_client.clob_types import MarketOrderArgs, OrderType
+    from py_clob_client_v2.clob_types import MarketOrderArgs, OrderType
     client = _get_clob_client()
     amount = max(round(size_usd, 2), 1.0)
-    args = MarketOrderArgs(token_id=token_id, amount=amount, side="BUY")
+    args = MarketOrderArgs(token_id=token_id, amount=amount, side="BUY",
+                           order_type=OrderType.FAK)
     try:
         signed = client.create_market_order(args)
         resp = client.post_order(signed, OrderType.FAK)
@@ -302,7 +303,7 @@ def _live_limit_fill(market_id, token_id, question, category, side, size_usd,
         return {"status": "rejected",
                 "reason": "limit order requires a positive limit_price"}
     try:
-        from py_clob_client.clob_types import OrderArgs, OrderType
+        from py_clob_client_v2.clob_types import OrderArgs, OrderType
     except ImportError as e:
         return {"status": "error",
                 "reason": f"py-clob-client limit API unavailable: {e}"}
@@ -362,7 +363,7 @@ def get_live_balance() -> dict:
     if not config.POLYMARKET_PRIVATE_KEY:
         return {"error": "POLYMARKET_PRIVATE_KEY not set", "balance_usd": None}
     try:
-        from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
+        from py_clob_client_v2.clob_types import AssetType, BalanceAllowanceParams
         client = _get_clob_client()
         bal = client.get_balance_allowance(
             BalanceAllowanceParams(asset_type=AssetType.COLLATERAL))
@@ -688,7 +689,7 @@ def get_open_orders() -> dict:
     ``{"error": str}`` when no private key is configured or the call fails.
     Never raises. Requires a private key (orders are per-API-key, Level-2 auth).
 
-    The CLOB ``get_orders`` returns raw order dicts whose field names vary by
+    The CLOB ``get_open_orders`` returns raw order dicts whose field names vary by
     build; we read each field defensively (e.g. ``id``/``orderID`` for the id,
     ``asset_id``/``token_id`` for the token) so a schema drift degrades to a
     missing value rather than an exception."""
@@ -696,14 +697,14 @@ def get_open_orders() -> dict:
         return {"error": "POLYMARKET_PRIVATE_KEY not set"}
     try:
         client = _get_clob_client()
-        raw = client.get_orders()
+        raw = client.get_open_orders()
     except Exception as e:
         return {"error": f"{type(e).__name__}: {e}"}
     # A genuinely empty book (no resting orders) is success, not an error.
     if not raw:
         return {"orders": []}
     if not isinstance(raw, list):
-        return {"error": f"unexpected get_orders response type: {type(raw).__name__}"}
+        return {"error": f"unexpected get_open_orders response type: {type(raw).__name__}"}
     orders = []
     for o in raw:
         if not isinstance(o, dict):
@@ -730,16 +731,17 @@ def cancel_order(order_id: str) -> dict:
     private key (Level-2 auth). Guards the import + missing key + any client
     exception so a flaky cancel can't crash the caller.
 
-    Note the CLOB ``cancel`` response may report individual orders that could
-    not be cancelled (e.g. already filled) under ``not_canceled``; we surface
+    Note the CLOB ``cancel_order`` response may report individual orders that
+    could not be cancelled (e.g. already filled) under ``not_canceled``; we surface
     that detail but still treat a non-erroring call as ``cancelled``."""
     if not isinstance(order_id, str) or not order_id.strip():
         return {"status": "error", "reason": "order_id must be a non-empty string"}
     if not config.POLYMARKET_PRIVATE_KEY:
         return {"status": "error", "reason": "POLYMARKET_PRIVATE_KEY not set"}
     try:
+        from py_clob_client_v2.clob_types import OrderPayload
         client = _get_clob_client()
-        resp = client.cancel(order_id)
+        resp = client.cancel_order(OrderPayload(orderID=order_id))
     except Exception as e:
         return {"status": "error", "reason": f"{type(e).__name__}: {e}"}
     result = {"status": "cancelled", "order_id": order_id}
@@ -940,15 +942,15 @@ def _live_sell(token_id: str, shares: float) -> dict:
                 "shares_sold": 0.0}
     import math
 
-    from py_clob_client.clob_types import MarketOrderArgs, OrderType
+    from py_clob_client_v2.clob_types import MarketOrderArgs, OrderType
     client = _get_clob_client()
 
     # Query the actual token balance to avoid "not enough balance" errors;
     # never try to sell more than we actually hold.
     try:
-        from py_clob_client.clob_types import BalanceAllowanceParams
+        from py_clob_client_v2.clob_types import AssetType, BalanceAllowanceParams
         bal = client.get_balance_allowance(
-            BalanceAllowanceParams(asset_type="CONDITIONAL", token_id=token_id))
+            BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=token_id))
         actual_balance = float(bal.get("balance", "0")) / 1e6
         if 0 < actual_balance < shares:
             shares = actual_balance
@@ -960,7 +962,8 @@ def _live_sell(token_id: str, shares: float) -> dict:
         return {"status": "error", "reason": "sell size below minimum (0.1 shares)",
                 "shares_sold": 0.0}
 
-    args = MarketOrderArgs(token_id=token_id, amount=sell_shares, side="SELL")
+    args = MarketOrderArgs(token_id=token_id, amount=sell_shares, side="SELL",
+                           order_type=OrderType.FAK)
     try:
         signed = client.create_market_order(args)
         resp = client.post_order(signed, OrderType.FAK)

@@ -305,7 +305,7 @@ It speaks MCP over stdio. Point your MCP client's server config at this command
 Optional extras:
 
 ```bash
-uv sync --extra trade   # live CLOB trading (py-clob-client)
+uv sync --extra trade   # live CLOB trading (py-clob-client-v2 — Polymarket CLOB V2)
 ```
 
 ## Development

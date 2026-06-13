@@ -49,7 +49,7 @@ def test_get_open_orders_success_maps_fields(env, monkeypatch):
     monkeypatch.setattr(ex.config, "POLYMARKET_PRIVATE_KEY", "0xkey")
 
     class FakeClient:
-        def get_orders(self):
+        def get_open_orders(self):
             return [
                 {"id": "OID1", "market": "M1", "asset_id": "tokA", "side": "BUY",
                  "price": "0.45", "original_size": "100", "size_matched": "20",
@@ -84,7 +84,7 @@ def test_get_open_orders_empty_returns_empty_list(env, monkeypatch):
     monkeypatch.setattr(ex.config, "POLYMARKET_PRIVATE_KEY", "0xkey")
 
     class FakeClient:
-        def get_orders(self):
+        def get_open_orders(self):
             return []  # no resting orders — success, not an error
 
     monkeypatch.setattr(ex, "_get_clob_client", lambda: FakeClient())
@@ -97,7 +97,7 @@ def test_get_open_orders_client_exception_is_error_not_raise(env, monkeypatch):
     monkeypatch.setattr(ex.config, "POLYMARKET_PRIVATE_KEY", "0xkey")
 
     class FakeClient:
-        def get_orders(self):
+        def get_open_orders(self):
             raise RuntimeError("clob down")
 
     monkeypatch.setattr(ex, "_get_clob_client", lambda: FakeClient())
@@ -146,9 +146,9 @@ def test_cancel_order_success(env, monkeypatch):
     calls = []
 
     class FakeClient:
-        def cancel(self, order_id):
-            calls.append(order_id)
-            return {"canceled": [order_id], "not_canceled": {}}
+        def cancel_order(self, payload):
+            calls.append(payload.orderID)
+            return {"canceled": [payload.orderID], "not_canceled": {}}
 
     monkeypatch.setattr(ex, "_get_clob_client", lambda: FakeClient())
     res = ex.cancel_order("OID1")
@@ -164,9 +164,9 @@ def test_cancel_order_surfaces_not_canceled_detail(env, monkeypatch):
     monkeypatch.setattr(ex.config, "POLYMARKET_PRIVATE_KEY", "0xkey")
 
     class FakeClient:
-        def cancel(self, order_id):
+        def cancel_order(self, payload):
             # Order already filled -> CLOB reports it couldn't be cancelled.
-            return {"canceled": [], "not_canceled": {order_id: "already matched"}}
+            return {"canceled": [], "not_canceled": {payload.orderID: "already matched"}}
 
     monkeypatch.setattr(ex, "_get_clob_client", lambda: FakeClient())
     res = ex.cancel_order("OID1")
@@ -179,7 +179,7 @@ def test_cancel_order_client_exception_is_error_not_raise(env, monkeypatch):
     monkeypatch.setattr(ex.config, "POLYMARKET_PRIVATE_KEY", "0xkey")
 
     class FakeClient:
-        def cancel(self, order_id):
+        def cancel_order(self, payload):
             raise RuntimeError("cancel failed")
 
     monkeypatch.setattr(ex, "_get_clob_client", lambda: FakeClient())

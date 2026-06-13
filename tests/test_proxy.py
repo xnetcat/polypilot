@@ -4,13 +4,13 @@ import polymarket_mcp.execution as ex
 
 class _FakeClob:
     def set_api_creds(self, creds): pass
-    def create_or_derive_api_creds(self): return {}
+    def create_or_derive_api_key(self): return {}
 
 
 def test_clob_client_installs_proxy_when_configured(monkeypatch):
     monkeypatch.setattr(ex.config, "HTTP_PROXY", "http://u:p@1.2.3.4:8000")
-    monkeypatch.setattr("py_clob_client.client.ClobClient", lambda **k: _FakeClob())
-    import py_clob_client.http_helpers.helpers as helpers
+    monkeypatch.setattr("py_clob_client_v2.client.ClobClient", lambda **k: _FakeClob())
+    import py_clob_client_v2.http_helpers.helpers as helpers
     original = helpers._http_client
     ex._clob_client = None
     try:
@@ -65,8 +65,8 @@ def test_geoblock_error_returns_actionable_proxy_hint(monkeypatch):
 
 def test_clob_client_untouched_without_proxy(monkeypatch):
     monkeypatch.setattr(ex.config, "HTTP_PROXY", "")
-    monkeypatch.setattr("py_clob_client.client.ClobClient", lambda **k: _FakeClob())
-    import py_clob_client.http_helpers.helpers as helpers
+    monkeypatch.setattr("py_clob_client_v2.client.ClobClient", lambda **k: _FakeClob())
+    import py_clob_client_v2.http_helpers.helpers as helpers
     original = helpers._http_client
     ex._clob_client = None
     try:

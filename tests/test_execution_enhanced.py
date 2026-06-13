@@ -459,10 +459,10 @@ def test_live_limit_order_immediate_fill(env, monkeypatch):
                     "takingAmount": "40", "makingAmount": "20"}
 
     monkeypatch.setattr(ex, "_get_clob_client", lambda: FakeClient())
-    # Inject our fake py_clob_client.clob_types module for the local import.
+    # Inject our fake py_clob_client_v2.clob_types module for the local import.
     import sys
-    monkeypatch.setitem(sys.modules, "py_clob_client", type("P", (), {}))
-    monkeypatch.setitem(sys.modules, "py_clob_client.clob_types", fake_clob_types)
+    monkeypatch.setitem(sys.modules, "py_clob_client_v2", type("P", (), {}))
+    monkeypatch.setitem(sys.modules, "py_clob_client_v2.clob_types", fake_clob_types)
 
     res = ex.place_order(mode="live", market_id="m1", token_id="tok",
         question="Q", category="weather", side="YES", size_usd=20.0,
@@ -506,8 +506,8 @@ def test_live_limit_order_resting(env, monkeypatch):
 
     monkeypatch.setattr(ex, "_get_clob_client", lambda: FakeClient())
     import sys
-    monkeypatch.setitem(sys.modules, "py_clob_client", type("P", (), {}))
-    monkeypatch.setitem(sys.modules, "py_clob_client.clob_types", fake_clob_types)
+    monkeypatch.setitem(sys.modules, "py_clob_client_v2", type("P", (), {}))
+    monkeypatch.setitem(sys.modules, "py_clob_client_v2.clob_types", fake_clob_types)
 
     res = ex.place_order(mode="live", market_id="m1", token_id="tok",
         question="Q", category="weather", side="YES", size_usd=20.0,
@@ -545,7 +545,7 @@ def test_live_limit_missing_api_returns_error(env, monkeypatch):
     real_import = builtins.__import__
 
     def fake_import(name, *args, **kwargs):
-        if name == "py_clob_client.clob_types":
+        if name == "py_clob_client_v2.clob_types":
             raise ImportError("no OrderArgs in this build")
         return real_import(name, *args, **kwargs)
 
@@ -600,8 +600,8 @@ def test_get_live_balance_with_client(env, monkeypatch):
 
     monkeypatch.setattr(ex, "_get_clob_client", lambda: FakeClient())
     import sys
-    monkeypatch.setitem(sys.modules, "py_clob_client", type("P", (), {}))
-    monkeypatch.setitem(sys.modules, "py_clob_client.clob_types", fake_clob_types)
+    monkeypatch.setitem(sys.modules, "py_clob_client_v2", type("P", (), {}))
+    monkeypatch.setitem(sys.modules, "py_clob_client_v2.clob_types", fake_clob_types)
 
     res = ex.get_live_balance()
     assert res["balance_usd"] == 123.45
@@ -624,8 +624,8 @@ def test_get_live_balance_client_error(env, monkeypatch):
 
     monkeypatch.setattr(ex, "_get_clob_client", lambda: FakeClient())
     import sys
-    monkeypatch.setitem(sys.modules, "py_clob_client", type("P", (), {}))
-    monkeypatch.setitem(sys.modules, "py_clob_client.clob_types", fake_clob_types)
+    monkeypatch.setitem(sys.modules, "py_clob_client_v2", type("P", (), {}))
+    monkeypatch.setitem(sys.modules, "py_clob_client_v2.clob_types", fake_clob_types)
 
     res = ex.get_live_balance()
     assert "error" in res
