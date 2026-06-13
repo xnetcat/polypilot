@@ -77,6 +77,20 @@ in-session loop** until the user stops you or the kill-switch trips.
    z-score / imbalance) to inform — never gate — the thesis. Write an explicit
    fair-probability estimate and a one-paragraph thesis. Consult the category
    playbook in `references/`.
+   - **Structured tools first, web fallback second — cover as many markets as
+     possible.** Prefer the structured polypilot research tools whenever they fit
+     the market (`get_weather_forecast`, `get_crypto`, `get_sports`,
+     `get_esports`, `get_economic_data`, `get_news`) — they're reproducible. But
+     they don't cover everything: **esports, politics, culture, AI, science,
+     geopolitics, and novel/one-off markets** have no dedicated structured tool,
+     and `get_news` can return thin or empty. For esports markets call
+     `get_esports(question)` (PandaScore-backed — returns match/team data when a
+     PandaScore key is configured; otherwise web-search it). For any market the
+     structured tools don't cover, or when their output is thin/stale/empty, use
+     your built-in **`WebSearch` and `WebFetch`** tools (Claude Code) to gather
+     current facts — recent news, schedules, official data/announcements, polls,
+     expert estimates — before forming the fair-probability verdict. Cite sources
+     and **never invent data: it comes only from tool or search output.**
    - **Subagent accelerator (optional).** IF you can dispatch subagents (you have
      the `Task` tool — e.g. Claude Code), fan out the `polypilot-researcher`
      subagent IN PARALLEL over the top candidate markets, **capped at 3–5 per
@@ -214,8 +228,13 @@ about fills and kill-switch trips.
 - **Markets**: `list_markets`, `get_market`, `get_order_book`,
   `get_price_history`, `get_market_signals` (advisory technical reads —
   momentum / divergence / pullback / z-score / imbalance — to inform a thesis).
-- **Research**: `get_weather_forecast`, `get_crypto`, `get_sports`,
-  `get_economic_data`, `get_news`.
+- **Research (structured, preferred when they fit)**: `get_weather_forecast`,
+  `get_crypto`, `get_sports`, `get_esports` (PandaScore-backed esports data when
+  a key is configured), `get_economic_data`, `get_news`.
+- **Research (web fallback)**: your built-in `WebSearch` / `WebFetch` (Claude
+  Code) for markets the structured tools don't cover — esports without a key,
+  politics, culture, AI, science, geopolitics, novel markets — or when structured
+  / `get_news` output is thin or empty. Cite sources; never invent data.
 - **Analytics (advisory)**: `compute_edge`, `suggest_size`.
 - **Execution**: `place_order` (use `order_type='market'` (default) or `'limit'`
   with a `limit_price` for a resting GTC order), `close_position`.

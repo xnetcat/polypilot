@@ -579,3 +579,41 @@ def test_get_portfolio_no_live_balance_in_paper(srv, monkeypatch):
     out = srv.get_portfolio()
     assert out["cash"] == 100.0
     assert "live_balance_usd" not in out
+
+
+# --------------------------------------------------------------------------- #
+# get_esports -> esports.fetch_esports
+# --------------------------------------------------------------------------- #
+def test_get_esports_no_key_returns_error_without_network(srv, monkeypatch):
+    # conftest wipes POLYPILOT_PANDASCORE_KEY, so the reloaded config has no key:
+    # a detected-game question must return the no-key error dict and make NO
+    # network call (the module bails on the key check before any httpx.get).
+    monkeypatch.setattr(srv._esports.config, "PANDASCORE_KEY", "")
+    monkeypatch.setattr(srv._esports.httpx, "get",
+        lambda *a, **k: pytest.fail("no network call expected without a key"))
+    out = srv.get_esports("Will NAVI beat G2 in CS2?")
+    assert out["game"] == "csgo"
+    assert out["error"] == "POLYPILOT_PANDASCORE_KEY not set"
+    assert out["source"] == "pandascore"
+
+
+def test_get_esports_no_game_detected(srv):
+    # A non-esports question yields the no-game error and never touches the net.
+    out = srv.get_esports("Will it rain in Seattle tomorrow?")
+    assert out == {"error": "no esports game detected",
+                   "question": "Will it rain in Seattle tomorrow?"}
+
+
+def test_get_esports_delegates_to_fetch_esports(srv, monkeypatch):
+    sentinel = {"game": "dota2", "team1": "OG", "team2": "Liquid",
+                "status": "running", "source": "pandascore"}
+    captured = {}
+
+    def fake_fetch(question):
+        captured["question"] = question
+        return sentinel
+
+    monkeypatch.setattr(srv._esports, "fetch_esports", fake_fetch)
+    out = srv.get_esports("OG vs Liquid Dota 2")
+    assert out is sentinel
+    assert captured["question"] == "OG vs Liquid Dota 2"

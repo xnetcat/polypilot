@@ -7,11 +7,14 @@ tools:
   - mcp__plugin_polypilot_polypilot__get_sports
   - mcp__plugin_polypilot_polypilot__get_economic_data
   - mcp__plugin_polypilot_polypilot__get_news
+  - mcp__plugin_polypilot_polypilot__get_esports
   - mcp__plugin_polypilot_polypilot__get_order_book
   - mcp__plugin_polypilot_polypilot__get_price_history
   - mcp__plugin_polypilot_polypilot__get_market
   - mcp__plugin_polypilot_polypilot__get_similar_markets
   - mcp__plugin_polypilot_polypilot__compute_edge
+  - WebSearch
+  - WebFetch
   - Read
   - Glob
   - Grep
@@ -37,9 +40,23 @@ labels). If anything is missing, call `get_market(market_id)` to fill the gaps.
    - weather → `get_weather_forecast`
    - crypto → `get_crypto`
    - sports → `get_sports`
+   - esports → `get_esports` (PandaScore-backed: returns match/team data when a
+     PandaScore key is configured; if it returns nothing usable, fall back to
+     `WebSearch`/`WebFetch` per the next bullet)
    - economy/finance → `get_economic_data`
    - news-driven / other → `get_news`
    You may call more than one when the market spans categories.
+   - **Prefer the structured polypilot tools whenever they cover the market** —
+     they are reproducible and consistent. But the structured tools do NOT cover
+     every category: **politics, culture, AI, science, geopolitics, esports, and
+     novel/one-off markets** have no dedicated tool, and `get_news` can come back
+     thin or empty. **For any market the structured tools don't cover — or when
+     the structured/`get_news` output is thin, stale, or empty — use `WebSearch`
+     and `WebFetch`** to gather current facts: recent news, event schedules,
+     official data/announcements, polls, and credible expert estimates. This is
+     how you cover as many markets as possible. Always **cite your sources** (URL
+     or outlet) in `key_evidence`, prefer primary/official and recent sources,
+     and **never invent** a fact that isn't in tool or search output.
 2. **Read the market microstructure** — `get_order_book(token_id)` for the side
    you favor (best bid/ask, spread, imbalance, depth) and
    `get_price_history(token_id)` for the trend. Thin books or wide spreads weaken
@@ -58,8 +75,11 @@ labels). If anything is missing, call `get_market(market_id)` to fill the gaps.
 
 ## Rules
 
-- **Never invent data.** Form your view only from tool output. If a tool fails or
-  returns nothing usable, say so and lower your confidence accordingly.
+- **Never invent data.** Form your view only from tool output — including
+  `WebSearch`/`WebFetch` results when you use them for an uncovered or thin
+  market. Cite where each fact came from. If a tool fails or returns nothing
+  usable (and a web search turns up nothing credible either), say so and lower
+  your confidence accordingly.
 - **Do not trade and do not pretend to.** You have no `place_order` /
   `close_position`. Your job ends at the verdict.
 - Be honest about uncertainty. Confidence should reflect how hard the evidence is

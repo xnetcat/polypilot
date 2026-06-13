@@ -202,7 +202,7 @@ A single cumulative-loss circuit breaker is the one rule enforced in code:
 Everything else — strategy, edge bar, position sizing, concentration, and
 timing — is the agent's judgment, not hardcoded.
 
-## Tool surface (39 tools)
+## Tool surface (40 tools)
 
 Grouped by purpose. The agent calls what it needs; all tools return plain JSON.
 
@@ -215,10 +215,13 @@ Grouped by purpose. The agent calls what it needs; all tools return plain JSON.
 
 **Research**
 - `get_weather_forecast` — structured forecast (high/low °C, uncertainty) parsed from a weather market question (Open-Meteo + weather.gov).
-- `get_crypto` — spot price, 24h change, recent history, and the threshold direction for the market's target.
+- `get_crypto` — spot price, 24h change, recent history, the threshold direction for the market's target, and (for range/threshold markets) a lognormal `probability` estimate of the target band.
 - `get_sports` — ESPN-backed sport/teams/status/score for a sports market.
+- `get_esports` — PandaScore-backed game/teams/match-status/score for an esports market (CS2/CS:GO, Dota 2, LoL, Valorant, Overwatch, Rocket League); requires `POLYPILOT_PANDASCORE_KEY`, otherwise returns an error dict so the agent falls back to web search.
 - `get_economic_data` — FRED-backed official economic series (requires `FRED_API_KEY`).
-- `get_news` — recent headlines (RSS, plus NewsAPI if configured) matching a topic.
+- `get_news` — recent headlines (RSS, plus NewsAPI if configured) matching a topic; optional `category` (e.g. `esports`, `sports`, `politics`) prioritizes that category's curated feeds.
+
+> **Web-search fallback.** The structured tools above don't cover every market (politics, culture, AI, geopolitics, novel one-offs, or thin `get_news` results). For those, the agent uses its built-in **`WebSearch`/`WebFetch`** to gather current facts before forming a thesis — never inventing data.
 
 **Analytics** (advisory — calculators, not gates)
 - `compute_edge` — expected value and ROI per $1 after ~2% fees, given your fair probability, side, and the market price.
@@ -284,6 +287,7 @@ Configure via environment variables or a `.env` file (see `.env.example`). The
 | `POLYPILOT_TELEGRAM_CHAT_ID` | _(empty)_ | Telegram chat id for notification delivery. |
 | `FRED_API_KEY` | _(empty)_ | Enables `get_economic_data` (official economy/finance data via FRED). |
 | `NEWSAPI_KEY` | _(empty)_ | Optional — broader news coverage in `get_news`. RSS works with no key. |
+| `POLYPILOT_PANDASCORE_KEY` | _(empty)_ | Enables `get_esports` (match data via [PandaScore](https://pandascore.co); free tier available). Without it, `get_esports` returns an error dict and the agent falls back to web search. |
 
 ## Running the MCP server standalone
 

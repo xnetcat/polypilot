@@ -57,6 +57,7 @@ GAMMA_API: str = "https://gamma-api.polymarket.com"
 # --- Optional research API keys ---
 FRED_API_KEY: str = os.getenv("FRED_API_KEY", "")
 NEWSAPI_KEY: str = os.getenv("NEWSAPI_KEY", "")
+PANDASCORE_KEY: str = os.getenv("POLYPILOT_PANDASCORE_KEY", "")
 
 # --- Optional notifications (best-effort; all unset -> notifier is a no-op) ---
 # Generic webhook: a JSON {event, message, ...} is POSTed here.

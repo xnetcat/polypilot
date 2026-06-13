@@ -17,30 +17,58 @@ from .. import config
 
 log = logging.getLogger(__name__)
 
-# Curated RSS feeds (free, no API key needed). Ported from polydegen config.
-RSS_FEEDS = [
+# Curated RSS feeds (free, no API key needed), grouped by category so callers
+# can prioritize a topic area. Ported from polydegen config and broadened to
+# cover esports, sports, politics/world, and tech/AI alongside crypto/general.
+RSS_FEEDS_BY_CATEGORY: dict[str, list[str]] = {
     # General tech/AI
-    "https://news.google.com/rss/search?q=AI+artificial+intelligence&hl=en-US&gl=US&ceid=US:en",
-    "https://feeds.feedburner.com/TechCrunch",
-    "https://feeds.arstechnica.com/arstechnica/technology-lab",
-    "https://www.theverge.com/rss/index.xml",
-    "https://rss.nytimes.com/services/xml/rss/nyt/Technology.xml",
+    "tech": [
+        "https://news.google.com/rss/search?q=AI+artificial+intelligence&hl=en-US&gl=US&ceid=US:en",
+        "https://feeds.feedburner.com/TechCrunch",
+        "https://feeds.arstechnica.com/arstechnica/technology-lab",
+        "https://www.theverge.com/rss/index.xml",
+        "https://rss.nytimes.com/services/xml/rss/nyt/Technology.xml",
+    ],
     # Crypto
-    "https://cointelegraph.com/rss",
-    "https://www.coindesk.com/arc/outboundfeeds/rss/",
-    "https://decrypt.co/feed",
-    "https://news.google.com/rss/search?q=bitcoin+OR+ethereum+OR+solana+OR+crypto&hl=en-US&gl=US&ceid=US:en",
+    "crypto": [
+        "https://cointelegraph.com/rss",
+        "https://www.coindesk.com/arc/outboundfeeds/rss/",
+        "https://decrypt.co/feed",
+        "https://news.google.com/rss/search?q=bitcoin+OR+ethereum+OR+solana+OR+crypto&hl=en-US&gl=US&ceid=US:en",
+    ],
+    # Esports
+    "esports": [
+        "https://www.hltv.org/rss/news",
+        "https://www.dexerto.com/feed/",
+        "https://news.google.com/rss/search?q=esports+OR+CS2+OR+%22League+of+Legends%22+OR+Dota+OR+Valorant&hl=en-US&gl=US&ceid=US:en",
+    ],
     # Sports
-    "https://www.espn.com/espn/rss/news",
-    "https://news.google.com/rss/search?q=NBA+OR+NFL+OR+UFC+OR+soccer+OR+premier+league&hl=en-US&gl=US&ceid=US:en",
+    "sports": [
+        "https://www.espn.com/espn/rss/news",
+        "https://news.google.com/rss/search?q=NBA+OR+NFL+OR+UFC+OR+soccer+OR+premier+league&hl=en-US&gl=US&ceid=US:en",
+    ],
     # Weather
-    "https://news.google.com/rss/search?q=weather+forecast+temperature&hl=en-US&gl=US&ceid=US:en",
-    # Politics/Geopolitics
-    "https://rss.nytimes.com/services/xml/rss/nyt/Politics.xml",
-    "https://news.google.com/rss/search?q=congress+OR+white+house+OR+tariff+OR+sanctions&hl=en-US&gl=US&ceid=US:en",
-    # Science/Space
-    "https://news.google.com/rss/search?q=SpaceX+OR+NASA+OR+rocket+launch&hl=en-US&gl=US&ceid=US:en",
-]
+    "weather": [
+        "https://news.google.com/rss/search?q=weather+forecast+temperature&hl=en-US&gl=US&ceid=US:en",
+    ],
+    # Politics / World
+    "politics": [
+        "https://rss.nytimes.com/services/xml/rss/nyt/Politics.xml",
+        "https://feeds.reuters.com/Reuters/worldNews",
+        "https://rss.politico.com/politics-news.xml",
+        "https://news.google.com/rss/search?q=congress+OR+white+house+OR+tariff+OR+sanctions+OR+election&hl=en-US&gl=US&ceid=US:en",
+    ],
+    # Science / Space
+    "science": [
+        "https://news.google.com/rss/search?q=SpaceX+OR+NASA+OR+rocket+launch&hl=en-US&gl=US&ceid=US:en",
+    ],
+}
+
+# Flat list of every curated feed (deduped, order-preserving). Kept as a
+# module-level name for backward compatibility with anything importing it.
+RSS_FEEDS = list(dict.fromkeys(
+    url for feeds in RSS_FEEDS_BY_CATEGORY.values() for url in feeds
+))
 
 DEFAULT_LOOKBACK_HOURS = 48
 
@@ -171,21 +199,54 @@ def deduplicate(items: list[NewsItem]) -> list[NewsItem]:
     return unique
 
 
-def _gather_rss(lookback_hours: int = DEFAULT_LOOKBACK_HOURS) -> list[NewsItem]:
-    """Scrape the curated RSS feed set and return all recent items."""
+def _feeds_for_category(category: str | None) -> list[str]:
+    """Return feed URLs for a category, prioritized; falls back to all feeds.
+
+    When ``category`` matches a known group, that group's feeds come first,
+    followed by the remaining feeds (so a category-specific call still benefits
+    from cross-category coverage). When ``category`` is None or unknown, all
+    curated feeds are returned in their natural order.
+    """
+    if not category:
+        return list(RSS_FEEDS)
+    group = RSS_FEEDS_BY_CATEGORY.get(category.lower().strip())
+    if not group:
+        return list(RSS_FEEDS)
+    rest = [url for url in RSS_FEEDS if url not in group]
+    return list(group) + rest
+
+
+def _gather_rss(
+    lookback_hours: int = DEFAULT_LOOKBACK_HOURS,
+    category: str | None = None,
+) -> list[NewsItem]:
+    """Scrape the curated RSS feed set and return all recent items.
+
+    With ``category`` set, that category's feeds are scraped first (others
+    still follow); otherwise every curated feed is scraped.
+    """
     all_items: list[NewsItem] = []
-    for feed_url in RSS_FEEDS:
+    for feed_url in _feeds_for_category(category):
         all_items.extend(scrape_rss(feed_url, lookback_hours))
     return all_items
 
 
-def fetch_news(topic: str, limit: int = 20, lookback_hours: int = DEFAULT_LOOKBACK_HOURS) -> dict:
+def fetch_news(
+    topic: str,
+    limit: int = 20,
+    lookback_hours: int = DEFAULT_LOOKBACK_HOURS,
+    category: str | None = None,
+) -> dict:
     """Recent news headlines (RSS, plus NewsAPI if configured) matching a topic.
 
     Filters headlines by case-insensitive substring match on the topic, dedups,
     and returns {topic, count, headlines: [{headline, source, published, url}]}.
+
+    When ``category`` is given (e.g. "esports", "sports", "politics", "crypto",
+    "tech"), that category's feeds are prioritized; otherwise all feeds are
+    pulled. ``category`` is optional and backward-compatible.
     """
-    items = list(_gather_rss(lookback_hours))
+    items = list(_gather_rss(lookback_hours, category=category))
     if config.NEWSAPI_KEY:
         items.extend(scrape_newsapi(topic, lookback_hours))
 

@@ -71,11 +71,24 @@ pass, no waiting), not the rules or who decides.
    `get_market_signals(token_id)` for a technical read (momentum / divergence /
    pullback / z-score / imbalance) to inform — not gate — the thesis. Write an
    explicit fair-probability estimate and a one-paragraph thesis. Consult the
-   category playbooks in `skills/polypilot/references/`. If you have the `Task`
-   tool, you
-   may fan out the `polypilot-researcher` subagent in parallel over the top 3–5
-   candidates (optional accelerator); otherwise research inline — the bar is
-   identical.
+   category playbooks in `skills/polypilot/references/`.
+   - **Structured tools first, web fallback second — cover as many markets as
+     possible.** Prefer the structured polypilot research tools whenever they fit
+     (`get_weather_forecast`, `get_crypto`, `get_sports`, `get_esports`,
+     `get_economic_data`, `get_news`) — they're reproducible. They don't cover
+     everything, though: **esports, politics, culture, AI, science, geopolitics,
+     and novel/one-off markets** have no dedicated structured tool, and `get_news`
+     can come back thin or empty. For esports markets call `get_esports(question)`
+     (PandaScore-backed — returns match/team data when a PandaScore key is
+     configured; otherwise web-search it). For any market the structured tools
+     don't cover, or when their output is thin/stale/empty, use your built-in
+     **`WebSearch` and `WebFetch`** tools (Claude Code) to gather current facts —
+     recent news, schedules, official data/announcements, polls, expert estimates
+     — before forming the verdict. Cite sources and **never invent data: it comes
+     only from tool or search output.**
+   - If you have the `Task` tool, you may fan out the `polypilot-researcher`
+     subagent in parallel over the top 3–5 candidates (optional accelerator);
+     otherwise research inline — the bar is identical.
 5. **Evaluate edge** — before sizing, optionally call
    `calibrate_probability(fair_prob)` to shade your raw fair-prob with your OWN
    resolved-trade track record (the bucket's historical win rate; falls back to

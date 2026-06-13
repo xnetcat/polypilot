@@ -15,6 +15,7 @@ from . import signals as _signals
 from . import state as _state
 from .research import crypto as _crypto
 from .research import economic as _economic
+from .research import esports as _esports
 from .research import news as _news
 from .research import sports as _sports
 from .research import weather as _weather
@@ -182,10 +183,23 @@ def get_economic_data(question: str) -> dict:
 
 
 @mcp.tool()
-def get_news(topic: str, limit: int = 20) -> dict:
+def get_news(topic: str, limit: int = 20, category: str | None = None) -> dict:
     """Recent news headlines (RSS, plus NewsAPI if configured) matching a topic.
-    Use to form or re-check a thesis on news-driven markets."""
-    return _news.fetch_news(topic, limit=limit)
+    Use to form or re-check a thesis on news-driven markets. Optional `category`
+    (e.g. "esports", "sports", "politics", "crypto", "tech", "weather",
+    "science") prioritizes that category's curated feeds while still drawing on
+    the rest for coverage."""
+    return _news.fetch_news(topic, limit=limit, category=category)
+
+
+@mcp.tool()
+def get_esports(question: str) -> dict:
+    """PandaScore-backed data for an esports market (CS2/CS:GO, Dota 2, League of
+    Legends, Valorant, Overwatch, Rocket League): detected game, the two teams,
+    match status, scheduled time, and any scores. Use to form or re-check a
+    thesis on esports markets. Requires POLYPILOT_PANDASCORE_KEY — without it the
+    tool returns an error dict and you should fall back to WebSearch/WebFetch."""
+    return _esports.fetch_esports(question)
 
 
 # --- Execution tools ---
