@@ -98,12 +98,23 @@ in-session loop** until the user stops you or the kill-switch trips.
 - **Portfolio & memory**: `get_portfolio`, `get_positions`, `get_trade_history`,
   `reconcile_positions`, `get_similar_markets`, `record_evaluation`,
   `record_thesis`.
+  - `get_performance_stats` — your track record (win rate, PnL, ROI) from
+    resolved evaluations, broken down by category; learn what you trade well.
+  - `get_session_report` — one-shot snapshot (portfolio + risk + performance +
+    recent trades + open count) for an end-of-cycle status check.
 - **Markets**: `list_markets`, `get_market`, `get_order_book`,
   `get_price_history`.
 - **Research**: `get_weather_forecast`, `get_crypto`, `get_sports`,
   `get_economic_data`, `get_news`.
 - **Analytics (advisory)**: `compute_edge`, `suggest_size`.
-- **Execution**: `place_order`, `close_position`.
+- **Execution**: `place_order` (use `order_type='market'` (default) or `'limit'`
+  with a `limit_price` for a resting GTC order), `close_position`.
+- **Live trading ops (read-only checks; place no order)**:
+  - `get_live_balance` — on-chain USDC collateral balance from the CLOB.
+  - `sync_live_positions` — diff on-chain vs locally-tracked positions to spot
+    drift (reports `in_sync` only when the chain was actually readable).
+  - `preflight_live` — pre-flight checklist (key set, CLOB creds, positive
+    balance, kill-switch configured) before any live trading.
 
 ## Subagents (optional, when available)
 Auto-discovered from the plugin's `agents/` directory; usable only by clients

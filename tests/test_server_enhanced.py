@@ -96,6 +96,30 @@ def test_get_portfolio_unrealized_enrichment(srv, monkeypatch):
     assert out["unrealized_pnl"] == 4.0
     # realized_pnl is 0 on a fresh portfolio with one open position.
     assert out["total_pnl"] == round(out["realized_pnl"] + 4.0, 2)
+    assert out["marked_positions"] == 1
+
+
+def test_get_portfolio_per_position_best_effort(srv, monkeypatch):
+    # Two positions: one has a usable midpoint, one does not. Enrichment must
+    # mark the good one and SKIP the bad one (not abort everything).
+    srv._state.open_position("paper", market_id="m1", token_id="good",
+        question="Q1", category="crypto", side="YES", entry_price=0.50,
+        size_usd=20.0, shares=40.0, fair_prob=0.6, confidence=0.7, thesis="t")
+    srv._state.open_position("paper", market_id="m2", token_id="bad",
+        question="Q2", category="crypto", side="YES", entry_price=0.50,
+        size_usd=10.0, shares=20.0, fair_prob=0.6, confidence=0.7, thesis="t")
+
+    def fake_book(tid):
+        if tid == "good":
+            return {"midpoint": 0.60, "best_bid": 0.59, "best_ask": 0.61}
+        return {"error": "one-sided book", "midpoint": 0.0}
+
+    monkeypatch.setattr(srv._order_book, "fetch_order_book", fake_book)
+    out = srv.get_portfolio()
+    # Only the good position is marked: value 40 * 0.60 = 24.0, cost 20.0.
+    assert out["marked_positions"] == 1
+    assert out["mark_to_market_value"] == 24.0
+    assert out["unrealized_pnl"] == 4.0
 
 
 def test_get_portfolio_enrichment_degrades_on_book_error(srv, monkeypatch):
@@ -109,6 +133,7 @@ def test_get_portfolio_enrichment_degrades_on_book_error(srv, monkeypatch):
     assert out["cash"] == 80.0  # base portfolio still returned
     assert "unrealized_pnl" not in out
     assert "mark_to_market_value" not in out
+    assert "marked_positions" not in out  # nothing markable -> no enrichment
 
 
 # --------------------------------------------------------------------------- #
@@ -150,7 +175,9 @@ def test_get_session_report_shape(srv, monkeypatch):
     assert report["portfolio"]["cash"] == 100.0
     assert "breaker_tripped" in report["risk"]
     assert set(report["performance"].keys()) == {"overall", "by_category"}
-    assert isinstance(report["recent_trades"], list)
+    # recent_trades is wrapped {"trades": [...]} to match get_trade_history.
+    assert isinstance(report["recent_trades"], dict)
+    assert isinstance(report["recent_trades"]["trades"], list)
     assert report["open_positions"] == 0
 
 

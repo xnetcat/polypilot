@@ -218,32 +218,39 @@ def preflight_live() -> dict:
 def get_portfolio() -> dict:
     """Cash, realized/unrealized PnL, open position count, exposure, mode.
     Best-effort marks open positions to market (live book midpoints) to add
-    `unrealized_pnl`, `mark_to_market_value`, and `total_pnl`; if any book is
-    unavailable the unrealized keys are omitted and the base portfolio is still
-    returned. With zero open positions there is NO network call."""
+    `unrealized_pnl`, `mark_to_market_value`, `total_pnl`, and `marked_positions`
+    (how many positions had a usable midpoint). Marking is PER-POSITION: a
+    position whose book lacks a usable midpoint is skipped, not fatal — the other
+    positions are still marked. If NO position can be marked the unrealized keys
+    are omitted and the base portfolio is returned. With zero open positions
+    there is NO network call."""
     portfolio = _state.get_portfolio()
     positions = _state.get_positions()
     # No open positions -> nothing to mark; skip all network entirely.
     if not positions:
         return portfolio
-    try:
-        mark_value = 0.0
-        cost_basis = 0.0
-        for p in positions:
+    mark_value = 0.0
+    cost_basis = 0.0
+    marked = 0
+    for p in positions:
+        try:
             book = _order_book.fetch_order_book(p["token_id"])
             midpoint = book.get("midpoint")
-            if not midpoint:  # None or 0.0 (no two-sided book) -> can't mark
-                raise ValueError("no midpoint for open position")
-            mark_value += p["shares"] * midpoint
-            cost_basis += p["size_usd"]
+        except Exception:
+            midpoint = None  # a failed book fetch just skips this position
+        if not midpoint:  # None or 0.0 (no two-sided book) -> can't mark; skip
+            continue
+        mark_value += p["shares"] * midpoint
+        cost_basis += p["size_usd"]
+        marked += 1
+    # Only enrich when at least one position was markable; otherwise leave the
+    # base portfolio untouched (no misleading partial unrealized figures).
+    if marked:
         unrealized = mark_value - cost_basis
         portfolio["unrealized_pnl"] = round(unrealized, 2)
         portfolio["mark_to_market_value"] = round(mark_value, 2)
         portfolio["total_pnl"] = round(portfolio["realized_pnl"] + unrealized, 2)
-    except Exception:
-        # Marking is strictly best-effort: a failed/absent book must never break
-        # the call. Return the base portfolio without the unrealized keys.
-        pass
+        portfolio["marked_positions"] = marked
     return portfolio
 
 
@@ -277,7 +284,9 @@ def get_session_report() -> dict:
         "portfolio": get_portfolio(),
         "risk": _risk.risk_status(),
         "performance": _state.get_performance_stats(),
-        "recent_trades": _state.get_trade_history(limit=10),
+        # Wrapped as {"trades": [...]} to match the standalone get_trade_history
+        # tool's shape for consistency.
+        "recent_trades": {"trades": _state.get_trade_history(limit=10)},
         "open_positions": len(_state.get_positions(status="open")),
     }
 

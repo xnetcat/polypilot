@@ -36,7 +36,15 @@ def place_order(*, mode: str | None = None, market_id: str, token_id: str,
         return {"status": "rejected", "reason": reason}
 
     cash = state.get_portfolio(mode)["cash"]
-    if size_usd > cash:
+    # Cash check differs by mode:
+    #   LIVE: never place a live order exceeding tracked cash — hard-reject.
+    #   PAPER: do NOT hard-reject on size_usd > cash. The actual fill is
+    #     book-depth- AND cash-limited; an order whose real fill fits within cash
+    #     should fill (partially). Only reject when there is no cash at all.
+    if mode == "paper":
+        if cash <= 0:
+            return {"status": "rejected", "reason": f"insufficient cash ${cash:.2f}"}
+    elif size_usd > cash:
         return {"status": "rejected", "reason": f"insufficient cash ${cash:.2f}"}
 
     # Closed-market guard: refuse to open into an already-resolved market.
@@ -47,8 +55,11 @@ def place_order(*, mode: str | None = None, market_id: str, token_id: str,
         return {"status": "rejected", "reason": "market is closed/resolved"}
 
     if mode == "paper":
+        # Cap the spend at available cash so a paper fill NEVER debits more than
+        # the portfolio holds. The book walk stops at min(size_usd, cash).
         return _paper_fill(market_id, token_id, question, category, side,
-                           size_usd, fair_prob, confidence, thesis, limit_price)
+                           size_usd, fair_prob, confidence, thesis, limit_price,
+                           cash=cash)
     return _live_fill(market_id, token_id, question, category, side, size_usd,
                       fair_prob, confidence, thesis, order_type, limit_price)
 
@@ -69,13 +80,19 @@ def _market_is_closed(market_id: str) -> bool:
 
 
 def _paper_fill(market_id, token_id, question, category, side, size_usd,
-                fair_prob, confidence, thesis, limit_price) -> dict:
+                fair_prob, confidence, thesis, limit_price, cash=None) -> dict:
     book = order_book.fetch_order_book(token_id)
     asks = book.get("asks")
 
+    # Effective spend cap: never spend more than min(requested size, cash).
+    # `cash=None` (legacy callers/tests) means "no cash cap" -> use size_usd.
+    effective_cap = size_usd if cash is None else min(size_usd, cash)
+    # Whether the cash cap (not just book depth) is the binding constraint.
+    cash_capped = cash is not None and cash < size_usd
+
     # Fallback path: a book with no detailed `asks` ladder (e.g. a mock that only
-    # returns best_ask/best_bid). Fill the whole size at best_ask, exactly as the
-    # original implementation did — preserving existing behavior/tests.
+    # returns best_ask/best_bid). Fill up to the effective cap at best_ask,
+    # preserving the original full-size behavior when uncapped.
     if not asks:
         fill_price = book.get("best_ask")
         if fill_price is None:
@@ -83,16 +100,18 @@ def _paper_fill(market_id, token_id, question, category, side, size_usd,
         if limit_price is not None and fill_price > limit_price:
             return {"status": "rejected",
                     "reason": f"ask {fill_price} above limit {limit_price}"}
-        shares = round(size_usd / fill_price, 2)
+        spend = round(effective_cap, 2)
+        shares = round(spend / fill_price, 2)
+        # A cash cap below the requested size makes this a partial fill.
         return _record_paper_fill(market_id, token_id, question, category, side,
-            size_usd, fill_price, shares, fair_prob, confidence, thesis,
-            partial=False)
+            spend, fill_price, shares, fair_prob, confidence, thesis,
+            partial=cash_capped)
 
     # Slippage-aware path: walk the asks (ascending price) spending USD until the
-    # full size is consumed, accumulating a size-weighted average fill price.
+    # effective cap is consumed, accumulating a size-weighted average fill price.
     spent = 0.0
     shares_acc = 0.0
-    remaining = size_usd
+    remaining = effective_cap
     for level in asks:
         try:
             price = float(level["price"])
@@ -126,7 +145,9 @@ def _paper_fill(market_id, token_id, question, category, side, size_usd,
                     "reason": f"ask {best} above limit {limit_price}"}
         return {"status": "rejected", "reason": "no ask liquidity in paper book"}
 
-    partial = remaining > 1e-9
+    # Partial if book depth (or limit) left some of the cap unspent, OR the cash
+    # cap kept us from spending the full requested size.
+    partial = remaining > 1e-9 or cash_capped
     fill_price = round(spent / shares_acc, 4)
     shares = round(shares_acc, 2)
     spent = round(spent, 2)
@@ -253,7 +274,7 @@ def _live_limit_fill(market_id, token_id, question, category, side, size_usd,
     making = float(resp.get("makingAmount") or 0)   # usdc spent
     if taking:
         shares = round(taking, 2)
-        fill_price = round(making / taking, 4) if taking else round(limit_price, 4)
+        fill_price = round(making / taking, 4)
         spend = making or size_usd
     else:
         fill_price = round(limit_price, 4)
@@ -286,19 +307,20 @@ def get_live_balance() -> dict:
         return {"error": f"{type(e).__name__}: {e}", "balance_usd": None}
 
 
-def get_live_positions() -> list[dict]:
-    """Aggregate net open positions from on-chain trade history via the CLOB
-    ``get_trades`` endpoint. Returns a list of dicts with market_id, outcome,
-    shares, avg_price, cost, asset_id. Empty list if no key or on error.
-    Ported/adapted from executor.get_live_positions."""
-    if not config.POLYMARKET_PRIVATE_KEY:
-        return []
+def _fetch_live_positions() -> tuple[list[dict], str | None]:
+    """Fetch + aggregate on-chain positions, distinguishing a genuine empty
+    result from a fetch failure. Returns ``(positions, error)`` where ``error``
+    is ``None`` on success (including a genuine zero-position account) or a short
+    string describing why the fetch failed. Requires a private key.
+
+    This is the failure-aware core that ``sync_live_positions`` uses; the public
+    ``get_live_positions`` wraps it to preserve its list-only contract."""
     try:
         from collections import defaultdict
         client = _get_clob_client()
         trades = client.get_trades()
         if not isinstance(trades, list):
-            return []
+            return [], f"unexpected get_trades response type: {type(trades).__name__}"
         positions = defaultdict(
             lambda: {"bought": 0.0, "sold": 0.0, "cost": 0.0, "asset_id": "",
                      "market_id": "", "outcome": ""})
@@ -335,9 +357,24 @@ def get_live_positions() -> list[dict]:
                     "cost": round(pos["cost"], 2),
                     "asset_id": pos["asset_id"],
                 })
-        return result
-    except Exception:
+        return result, None
+    except Exception as e:
+        return [], f"{type(e).__name__}: {e}"
+
+
+def get_live_positions() -> list[dict]:
+    """Aggregate net open positions from on-chain trade history via the CLOB
+    ``get_trades`` endpoint. Returns a list of dicts with market_id, outcome,
+    shares, avg_price, cost, asset_id. Empty list if no key or on error.
+    Ported/adapted from executor.get_live_positions.
+
+    NOTE: this swallows fetch errors as an empty list for back-compat; callers
+    that must distinguish failure from a genuinely empty account (e.g.
+    ``sync_live_positions``) should use ``_fetch_live_positions`` instead."""
+    if not config.POLYMARKET_PRIVATE_KEY:
         return []
+    positions, _error = _fetch_live_positions()
+    return positions
 
 
 def sync_live_positions(mode: str = "live") -> dict:
@@ -347,12 +384,46 @@ def sync_live_positions(mode: str = "live") -> dict:
       - ``on_chain_only``: markets held on-chain but not tracked locally
       - ``local_only``: markets tracked locally but not held on-chain
       - ``matched``: markets present in both
-      - ``in_sync``: True iff there are no discrepancies
+      - ``in_sync``: True iff the on-chain fetch SUCCEEDED and there are no
+        discrepancies
 
-    Best-effort: if the live position fetch fails it surfaces an ``error`` key.
+    Crucially, ``in_sync`` is never optimistically True when the chain state is
+    unknown:
+      - No ``POLYMARKET_PRIVATE_KEY`` -> returns an ``error`` with
+        ``in_sync: False`` (we cannot read the chain, so we cannot claim sync).
+      - On-chain fetch failure -> surfaces ``fetch_error`` with ``in_sync: False``
+        rather than treating the failure as a (misleading) empty chain.
+    A genuinely empty on-chain account with no local positions IS reported as
+    ``in_sync: True``.
     """
-    on_chain = get_live_positions()
     local = state.get_positions(mode, status="open")
+
+    # Cannot read the chain without a key: do NOT claim in_sync.
+    if not config.POLYMARKET_PRIVATE_KEY:
+        return {
+            "mode": mode,
+            "error": "POLYMARKET_PRIVATE_KEY not set",
+            "in_sync": False,
+            "on_chain_count": 0,
+            "local_count": len(local),
+            "on_chain_only": [],
+            "local_only": [],
+            "matched": [],
+        }
+
+    on_chain, fetch_error = _fetch_live_positions()
+    # A failed fetch is NOT an empty chain: report it and refuse to claim sync.
+    if fetch_error is not None:
+        return {
+            "mode": mode,
+            "fetch_error": fetch_error,
+            "in_sync": False,
+            "on_chain_count": 0,
+            "local_count": len(local),
+            "on_chain_only": [],
+            "local_only": [],
+            "matched": [],
+        }
 
     on_chain_by_market: dict[str, dict] = {}
     for p in on_chain:

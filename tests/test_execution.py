@@ -96,18 +96,42 @@ def test_reconcile_no_resolution_keeps_open(env, monkeypatch):
     assert state.get_portfolio("paper")["open_positions"] == 1
 
 
-def test_paper_insufficient_cash_rejected(env, monkeypatch):
+def test_paper_over_cash_fills_capped_to_cash(env, monkeypatch):
+    # Phase-15 behavior change: in PAPER mode an order larger than cash is NOT
+    # hard-rejected. The spend is capped to available cash and the fill is marked
+    # partial. (LIVE still hard-rejects — see test_execution_enhanced.)
     state, ex = env
     monkeypatch.setattr(ex.order_book, "fetch_order_book",
         lambda tid: {"best_ask": 0.50, "best_bid": 0.48})
-    # Bankroll is $100; ask for $150.
+    # Bankroll is $100; ask for $150 -> fills $100 worth (cash-capped), partial.
     res = ex.place_order(mode="paper", market_id="m1", token_id="tok",
         question="Q", category="weather", side="YES", size_usd=150.0,
         fair_prob=0.6, confidence=0.7, thesis="t")
+    assert res["status"] == "filled"
+    assert res["partial"] is True
+    assert res["size_usd"] == 100.0
+    assert res["shares"] == round(100.0 / 0.50, 2)  # 200 shares
+    # Never debit more than available cash -> goes to exactly $0.
+    assert state.get_portfolio("paper")["cash"] == 0.0
+
+
+def test_paper_rejected_when_no_cash(env, monkeypatch):
+    # With zero cash, a paper order IS rejected (cash <= 0 is the only paper
+    # rejection on cash grounds now).
+    state, ex = env
+    monkeypatch.setattr(ex.order_book, "fetch_order_book",
+        lambda tid: {"best_ask": 0.50, "best_bid": 0.48})
+    # Drain the full $100 bankroll first.
+    drain = ex.place_order(mode="paper", market_id="seed", token_id="seed",
+        question="Q", category="weather", side="YES", size_usd=100.0,
+        fair_prob=0.6, confidence=0.7, thesis="t")
+    assert drain["status"] == "filled"
+    assert state.get_portfolio("paper")["cash"] == 0.0
+    res = ex.place_order(mode="paper", market_id="m1", token_id="tok",
+        question="Q", category="weather", side="YES", size_usd=20.0,
+        fair_prob=0.6, confidence=0.7, thesis="t")
     assert res["status"] == "rejected"
     assert "insufficient cash" in res["reason"].lower()
-    assert state.get_positions("paper") == []
-    assert state.get_portfolio("paper")["cash"] == 100.0
 
 
 def test_paper_limit_price_rejected(env, monkeypatch):

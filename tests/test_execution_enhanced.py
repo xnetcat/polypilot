@@ -168,6 +168,116 @@ def test_partial_fill_on_shallow_book(env, monkeypatch):
     assert open_pos[0]["shares"] == 20.0
 
 
+def test_paper_cash_capped_partial_deep_book(env, monkeypatch):
+    # $100 requested, only $90 cash, deep book -> fills $90 (cash-capped partial),
+    # cash -> ~0, conservation holds. The book itself could absorb the full $100,
+    # so the cap is purely the cash.
+    state, ex = env
+    # Spend $10 of the starting $100 first so cash = $90.
+    asks_seed = [{"price": 0.50, "size": 10000}]
+    monkeypatch.setattr(ex.order_book, "fetch_order_book",
+        lambda tid: _book(asks=asks_seed))
+    seed = ex.place_order(mode="paper", market_id="seed", token_id="seed",
+        question="Q", category="weather", side="YES", size_usd=10.0,
+        fair_prob=0.6, confidence=0.7, thesis="t")
+    assert seed["status"] == "filled"
+    assert state.get_portfolio("paper")["cash"] == 90.0
+
+    # Now request $100 against a book deep enough for the full amount.
+    deep = [{"price": 0.50, "size": 10000}]
+    monkeypatch.setattr(ex.order_book, "fetch_order_book", lambda tid: _book(asks=deep))
+    res = ex.place_order(mode="paper", market_id="m1", token_id="tok",
+        question="Q", category="weather", side="YES", size_usd=100.0,
+        fair_prob=0.6, confidence=0.7, thesis="t")
+    assert res["status"] == "filled"
+    assert res["partial"] is True  # cash-capped
+    # Spend exactly the available cash, never more.
+    assert res["size_usd"] == 90.0
+    assert res["shares"] == round(90.0 / 0.50, 2)  # 180 shares
+    # Cash conservation: debit equals exactly the available cash -> ~0.
+    assert state.get_portfolio("paper")["cash"] == 0.0
+
+
+def test_paper_cash_capped_but_depth_capped_first(env, monkeypatch):
+    # $100 requested, $90 cash, but only ~$80 of book depth -> fills ~$80
+    # (depth-capped partial), strictly within cash.
+    state, ex = env
+    asks_seed = [{"price": 0.50, "size": 10000}]
+    monkeypatch.setattr(ex.order_book, "fetch_order_book",
+        lambda tid: _book(asks=asks_seed))
+    ex.place_order(mode="paper", market_id="seed", token_id="seed",
+        question="Q", category="weather", side="YES", size_usd=10.0,
+        fair_prob=0.6, confidence=0.7, thesis="t")
+    assert state.get_portfolio("paper")["cash"] == 90.0
+
+    # Book depth: 160 shares @ 0.50 = $80 total — shallower than both the
+    # requested $100 AND the $90 cash.
+    shallow = [{"price": 0.50, "size": 160}]
+    monkeypatch.setattr(ex.order_book, "fetch_order_book", lambda tid: _book(asks=shallow))
+    res = ex.place_order(mode="paper", market_id="m1", token_id="tok",
+        question="Q", category="weather", side="YES", size_usd=100.0,
+        fair_prob=0.6, confidence=0.7, thesis="t")
+    assert res["status"] == "filled"
+    assert res["partial"] is True  # depth-capped
+    assert res["size_usd"] == 80.0
+    assert res["shares"] == 160.0
+    # Spend stayed within available cash (and didn't reach the cash cap).
+    assert state.get_portfolio("paper")["cash"] == 10.0
+    assert res["size_usd"] < 90.0
+
+
+def test_paper_cash_capped_fallback_best_ask(env, monkeypatch):
+    # Cash cap also applies on the best_ask fallback path (no asks ladder).
+    state, ex = env
+    asks_seed = [{"price": 0.50, "size": 10000}]
+    monkeypatch.setattr(ex.order_book, "fetch_order_book",
+        lambda tid: _book(asks=asks_seed))
+    ex.place_order(mode="paper", market_id="seed", token_id="seed",
+        question="Q", category="weather", side="YES", size_usd=10.0,
+        fair_prob=0.6, confidence=0.7, thesis="t")
+    assert state.get_portfolio("paper")["cash"] == 90.0
+
+    monkeypatch.setattr(ex.order_book, "fetch_order_book",
+        lambda tid: {"best_ask": 0.50, "best_bid": 0.48})
+    res = ex.place_order(mode="paper", market_id="m1", token_id="tok",
+        question="Q", category="weather", side="YES", size_usd=100.0,
+        fair_prob=0.6, confidence=0.7, thesis="t")
+    assert res["status"] == "filled"
+    assert res["partial"] is True
+    assert res["size_usd"] == 90.0
+    assert res["shares"] == round(90.0 / 0.50, 2)  # 180 shares
+    assert state.get_portfolio("paper")["cash"] == 0.0
+
+
+def test_paper_rejects_when_no_cash(env, monkeypatch):
+    # Paper rejects only when cash <= 0 (here we drain it to exactly 0 first).
+    state, ex = env
+    deep = [{"price": 0.50, "size": 10000}]
+    monkeypatch.setattr(ex.order_book, "fetch_order_book", lambda tid: _book(asks=deep))
+    drain = ex.place_order(mode="paper", market_id="seed", token_id="seed",
+        question="Q", category="weather", side="YES", size_usd=100.0,
+        fair_prob=0.6, confidence=0.7, thesis="t")
+    assert drain["status"] == "filled"
+    assert state.get_portfolio("paper")["cash"] == 0.0
+    res = ex.place_order(mode="paper", market_id="m1", token_id="tok",
+        question="Q", category="weather", side="YES", size_usd=20.0,
+        fair_prob=0.6, confidence=0.7, thesis="t")
+    assert res["status"] == "rejected"
+    assert "cash" in res["reason"].lower()
+
+
+def test_live_rejects_when_over_cash(env, monkeypatch):
+    # LIVE still hard-rejects size_usd > tracked cash (no live order over cash).
+    state, ex = env
+    monkeypatch.setattr(ex.config, "POLYMARKET_PRIVATE_KEY", "0xkey")
+    res = ex.place_order(mode="live", market_id="m1", token_id="tok",
+        question="Q", category="weather", side="YES", size_usd=200.0,
+        fair_prob=0.6, confidence=0.7, thesis="t")
+    assert res["status"] == "rejected"
+    assert "cash" in res["reason"].lower()
+    assert state.get_positions("live") == []
+
+
 def test_slippage_limit_price_caps_walk(env, monkeypatch):
     # The walk stops at the limit price; deeper, pricier levels are skipped.
     state, ex = env
@@ -559,6 +669,7 @@ def test_get_live_positions_client_error_returns_empty(env, monkeypatch):
 # --------------------------------------------------------------------------- #
 def test_sync_reports_discrepancies_without_mutating(env, monkeypatch):
     state, ex = env
+    monkeypatch.setattr(ex.config, "POLYMARKET_PRIVATE_KEY", "0xkey")
     # Local open positions: markets "L1" (local-only) and "BOTH".
     state.open_position("live", market_id="L1", token_id="tL1", question="q",
         category="c", side="YES", entry_price=0.5, size_usd=10, shares=20,
@@ -567,11 +678,12 @@ def test_sync_reports_discrepancies_without_mutating(env, monkeypatch):
         category="c", side="YES", entry_price=0.5, size_usd=10, shares=20,
         fair_prob=0.5, confidence=0.5, thesis="t")
 
-    # On-chain: markets "BOTH" (matched) and "C1" (chain-only).
-    monkeypatch.setattr(ex, "get_live_positions", lambda: [
+    # On-chain: markets "BOTH" (matched) and "C1" (chain-only). The fetch
+    # SUCCEEDS (error=None), so a real diff is reported.
+    monkeypatch.setattr(ex, "_fetch_live_positions", lambda: ([
         {"market_id": "BOTH", "outcome": "Yes", "shares": 20.0, "avg_price": 0.5},
         {"market_id": "C1", "outcome": "Yes", "shares": 5.0, "avg_price": 0.3},
-    ])
+    ], None))
 
     diff = ex.sync_live_positions(mode="live")
     assert diff["in_sync"] is False
@@ -589,17 +701,51 @@ def test_sync_reports_discrepancies_without_mutating(env, monkeypatch):
 
 def test_sync_in_sync_when_matched(env, monkeypatch):
     state, ex = env
+    monkeypatch.setattr(ex.config, "POLYMARKET_PRIVATE_KEY", "0xkey")
     state.open_position("live", market_id="X", token_id="tX", question="q",
         category="c", side="YES", entry_price=0.5, size_usd=10, shares=20,
         fair_prob=0.5, confidence=0.5, thesis="t")
-    monkeypatch.setattr(ex, "get_live_positions", lambda: [
+    monkeypatch.setattr(ex, "_fetch_live_positions", lambda: ([
         {"market_id": "X", "outcome": "Yes", "shares": 20.0, "avg_price": 0.5},
-    ])
+    ], None))
     diff = ex.sync_live_positions(mode="live")
     assert diff["in_sync"] is True
     assert diff["on_chain_only"] == []
     assert diff["local_only"] == []
     assert diff["matched"] == ["X"]
+
+
+def test_sync_no_key_returns_error_not_in_sync(env, monkeypatch):
+    # Without a private key we cannot read the chain, so sync must NOT claim
+    # in_sync. It returns an explicit error form with in_sync False and reports
+    # the local count.
+    state, ex = env
+    monkeypatch.setattr(ex.config, "POLYMARKET_PRIVATE_KEY", "")
+    state.open_position("live", market_id="L1", token_id="tL1", question="q",
+        category="c", side="YES", entry_price=0.5, size_usd=10, shares=20,
+        fair_prob=0.5, confidence=0.5, thesis="t")
+    diff = ex.sync_live_positions(mode="live")
+    assert diff["in_sync"] is False
+    assert diff["error"] == "POLYMARKET_PRIVATE_KEY not set"
+    assert diff["on_chain_count"] == 0
+    assert diff["local_count"] == 1
+    assert diff["on_chain_only"] == []
+    assert diff["local_only"] == []
+    assert diff["matched"] == []
+
+
+def test_sync_fetch_failure_not_in_sync(env, monkeypatch):
+    # A failed on-chain fetch must be surfaced as fetch_error with in_sync False,
+    # NOT silently treated as an empty chain that "matches" an empty local book.
+    state, ex = env
+    monkeypatch.setattr(ex.config, "POLYMARKET_PRIVATE_KEY", "0xkey")
+    monkeypatch.setattr(ex, "_fetch_live_positions",
+        lambda: ([], "RuntimeError: chain unreachable"))
+    diff = ex.sync_live_positions(mode="live")
+    assert diff["in_sync"] is False
+    assert "fetch_error" in diff
+    assert diff["on_chain_count"] == 0
+    assert diff["local_count"] == 0
 
 
 # --------------------------------------------------------------------------- #
