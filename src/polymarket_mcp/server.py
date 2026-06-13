@@ -156,7 +156,9 @@ def place_order(market_id: str, token_id: str, question: str, category: str,
     """Buy `side` ('YES' or 'NO') on a market for size_usd. Records your thesis,
     confidence, and fair_prob with the position. Enforces the kill-switch and
     refuses if the breaker is tripped or cash is insufficient. Returns fill
-    details or a rejection reason. Get token_id from get_market()."""
+    details or a rejection reason. Get token_id from get_market(): pass the
+    `token_id` whose `outcome` matches the side you're buying (from get_market's
+    `tokens` list) — settlement keys off that token."""
     return _execution.place_order(market_id=market_id, token_id=token_id,
         question=question, category=category, side=side, size_usd=size_usd,
         fair_prob=fair_prob, confidence=confidence, thesis=thesis,
@@ -215,6 +217,24 @@ def get_similar_markets(keywords: str, limit: int = 5) -> dict:
     """Your historical track record on past markets matching these keywords —
     what you decided and how it resolved. Use to screen candidates."""
     return {"similar": _state.get_similar_markets(_state.config.MODE, keywords, limit)}
+
+
+@mcp.tool()
+def record_evaluation(market_id: str, question: str, category: str,
+                      keywords: str, decision: str, side: str = "",
+                      confidence: float = 0.0, fair_prob: float | None = None,
+                      yes_price: float = 0.0, thesis: str = "") -> dict:
+    """Log the view you formed on a market this cycle — for EVERY market you
+    evaluated, whether you traded it or skipped it. `decision` is one of
+    'buy_yes' | 'buy_no' | 'skip'. Pass concise lowercased `keywords`, your
+    `thesis`, `confidence`, `fair_prob`, and the market `yes_price`. This is what
+    builds the track record that get_similar_markets reads next cycle; outcomes
+    are backfilled automatically when the market resolves."""
+    row_id = _state.record_evaluation(_state.config.MODE, market_id=market_id,
+        question=question, category=category, keywords=keywords,
+        decision=decision, side=side, confidence=confidence, fair_prob=fair_prob,
+        yes_price=yes_price, thesis=thesis)
+    return {"status": "ok", "id": row_id}
 
 
 # --- Pacing ---

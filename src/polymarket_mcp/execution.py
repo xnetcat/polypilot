@@ -133,6 +133,14 @@ def reconcile_positions(mode: str | None = None) -> dict:
         payout = pos["shares"] * price
         r = state.close_position(mode, pos["id"], exit_price=price, payout=payout)
         settled += 1
+        # Best-effort: backfill the matching logged evaluation's outcome so the
+        # track record reflects how this market resolved. A missing intelligence
+        # row (returns False) must not break reconciliation.
+        outcome_side = pos["side"] if price >= 1.0 else (
+            "NO" if pos["side"] == "YES" else "YES")
+        state.update_evaluation_outcome(mode, pos["market_id"],
+            outcome_side=outcome_side, resolution_price=price,
+            pnl=r.get("realized_pnl"))
         details.append({"position_id": pos["id"], "question": pos["question"],
                         "result": "won" if price >= 1.0 else "lost",
                         "realized_pnl": r.get("realized_pnl")})

@@ -44,10 +44,21 @@ in-session loop** until the user stops you or the kill-switch trips.
    to stake. There is no hardcoded threshold — use judgment, and be willing to
    skip a whole cycle.
 6. **Trade** — `place_order(...)` with your `thesis`, `confidence`, `fair_prob`.
-   If it returns `rejected`, respect the reason.
-7. **Report** — a concise summary: markets reviewed, decisions + reasons, trades,
+   Pass the `token_id` whose `outcome` matches the side you're buying (from
+   `get_market`'s `tokens` list) — settlement keys off that token. If it returns
+   `rejected`, respect the reason.
+7. **Log the evaluation (every market, including skips)** — for EVERY market you
+   formed a view on this cycle, call `record_evaluation(...)`: when you trade
+   (`decision="buy_yes"` or `"buy_no"`) AND when you skip (`decision="skip"`).
+   Pass concise lowercased `keywords` (the key terms), your `thesis`,
+   `confidence`, `fair_prob`, and the market `yes_price`. This is what builds the
+   track record that `get_similar_markets` reads next cycle (step 3) — skip logs
+   matter as much as trades, because deprioritizing patterns you've passed on or
+   lost on depends on having recorded them. Outcomes are backfilled
+   automatically when the market resolves (via `reconcile_positions`).
+8. **Report** — a concise summary: markets reviewed, decisions + reasons, trades,
    and portfolio/PnL.
-8. **Wait** — `wait_for_next_cycle(min_seconds=...)` (default 300; shorter when
+9. **Wait** — `wait_for_next_cycle(min_seconds=...)` (default 300; shorter when
    positions are near resolution), then go to step 0.
 
 ## Judgment guidance
@@ -59,7 +70,8 @@ in-session loop** until the user stops you or the kill-switch trips.
 ## Tool reference (what each tool is for)
 - **Safety & pacing**: `get_risk_status`, `wait_for_next_cycle`.
 - **Portfolio & memory**: `get_portfolio`, `get_positions`, `get_trade_history`,
-  `reconcile_positions`, `get_similar_markets`, `record_thesis`.
+  `reconcile_positions`, `get_similar_markets`, `record_evaluation`,
+  `record_thesis`.
 - **Markets**: `list_markets`, `get_market`, `get_order_book`,
   `get_price_history`.
 - **Research**: `get_weather_forecast`, `get_crypto`, `get_sports`,

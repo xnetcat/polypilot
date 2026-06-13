@@ -146,6 +146,29 @@ def record_evaluation(mode, *, market_id, question, category, keywords, decision
         conn.close()
 
 
+def update_evaluation_outcome(mode, market_id, outcome_side, resolution_price,
+                              pnl) -> bool:
+    """Backfill the outcome of the most recent unresolved evaluation for a
+    market once it resolves. Returns whether a row was updated (False if there
+    is no logged evaluation for this market, e.g. a position opened before
+    evaluations were recorded)."""
+    conn = db.connect(mode)
+    try:
+        row = conn.execute(
+            "SELECT id FROM market_intelligence WHERE market_id=? AND resolved=0 "
+            "ORDER BY evaluated_at DESC LIMIT 1", (market_id,)).fetchone()
+        if row is None:
+            return False
+        conn.execute(
+            "UPDATE market_intelligence SET outcome_side=?, resolution_price=?, "
+            "pnl=?, resolved=1, resolved_at=? WHERE id=?",
+            (outcome_side, resolution_price, pnl, time.time(), row["id"]))
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
 def update_thesis(mode, position_id, thesis, confidence, fair_prob) -> bool:
     conn = db.connect(mode)
     try:
