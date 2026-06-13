@@ -1,0 +1,67 @@
+{
+  "properties": {
+    "updated": "2026-06-13T18:00:00+00:00",
+    "periods": [
+      {
+        "number": 1,
+        "name": "Today",
+        "startTime": "2026-06-14T06:00:00-04:00",
+        "endTime": "2026-06-14T18:00:00-04:00",
+        "isDaytime": true,
+        "temperature": 79,
+        "temperatureUnit": "F",
+        "shortForecast": "Sunny"
+      },
+      {
+        "number": 2,
+        "name": "Tonight",
+        "startTime": "2026-06-14T18:00:00-04:00",
+        "endTime": "2026-06-15T06:00:00-04:00",
+        "isDaytime": false,
+        "temperature": 63,
+        "temperatureUnit": "F",
+        "shortForecast": "Clear"
+      },
+      {
+        "number": 3,
+        "name": "Sunday",
+        "startTime": "2026-06-15T06:00:00-04:00",
+        "endTime": "2026-06-15T18:00:00-04:00",
+        "isDaytime": true,
+        "temperature": 84,
+        "temperatureUnit": "F",
+        "shortForecast": "Mostly Sunny"
+      },
+      {
+        "number": 4,
+        "name": "Sunday Night",
+        "startTime": "2026-06-15T18:00:00-04:00",
+        "endTime": "2026-06-16T06:00:00-04:00",
+        "isDaytime": false,
+        "temperature": 66,
+        "temperatureUnit": "F",
+        "shortForecast": "Partly Cloudy"
+      },
+      {
+        "number": 5,
+        "name": "Saturday",
+        "startTime": "2026-06-20T06:00:00-04:00",
+        "endTime": "2026-06-20T18:00:00-04:00",
+        "isDaytime": true,
+        "temperature": 90,
+        "temperatureUnit": "F",
+        "shortForecast": "Hot and Sunny"
+      },
+      {
+        "number": 6,
+        "name": "Saturday Night",
+        "startTime": "2026-06-20T18:00:00-04:00",
+        "endTime": "2026-06-21T06:00:00-04:00",
+        "isDaytime": false,
+        "temperature": 72,
+        "temperatureUnit": "F",
+        "shortForecast": "Warm"
+      }
+    ]
+  }
+}

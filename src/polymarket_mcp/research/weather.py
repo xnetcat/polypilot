@@ -72,6 +72,116 @@ def _fahrenheit_to_c(value_f: float) -> float:
     return (value_f - 32.0) * 5.0 / 9.0
 
 
+def _get_weathergov_research(
+    city: str, coords: tuple[float, float], target_date: str | None
+) -> dict | None:
+    """Secondary US-only forecast from the official api.weather.gov service.
+
+    Resolves the grid point for ``coords`` (``/points/{lat},{lon}`` → forecast
+    URL), pulls the daily periods, and reduces them to per-date daytime highs /
+    overnight lows in °C. Active alerts for the point are attached when easily
+    available. Best-effort: any HTTP/parse failure returns ``None`` and the
+    caller falls back to Open-Meteo alone — this never raises.
+    """
+    try:
+        lat, lon = coords
+        point_resp = httpx.get(
+            f"https://api.weather.gov/points/{lat},{lon}", timeout=10
+        )
+        point_resp.raise_for_status()
+        forecast_url = point_resp.json().get("properties", {}).get("forecast")
+        if not forecast_url:
+            return None
+
+        forecast_resp = httpx.get(forecast_url, timeout=10)
+        forecast_resp.raise_for_status()
+        periods = forecast_resp.json().get("properties", {}).get("periods", [])
+        if not periods:
+            return None
+
+        # weather.gov returns alternating daytime ("high") / nighttime ("low")
+        # periods. Collapse them to one entry per calendar date, taking the
+        # warmest daytime reading as the high and the coldest period as the low.
+        daily: dict[str, dict] = {}
+        for period in periods:
+            start_time = period.get("startTime")
+            if not start_time:
+                continue
+            date_value = start_time[:10]
+            temp_raw = period.get("temperature")
+            if temp_raw is None:
+                continue
+            try:
+                temp = float(temp_raw)
+            except (TypeError, ValueError):
+                continue
+            unit = str(period.get("temperatureUnit", "F")).upper()
+            temp_c = _fahrenheit_to_c(temp) if unit == "F" else temp
+            entry = daily.setdefault(
+                date_value,
+                {"date": date_value, "high_c": None, "low_c": None, "summaries": []},
+            )
+            summary = period.get("shortForecast", "")
+            if summary:
+                entry["summaries"].append(summary)
+            if period.get("isDaytime", False):
+                current_high = entry["high_c"]
+                entry["high_c"] = round(
+                    temp_c if current_high is None else max(temp_c, current_high), 2
+                )
+            else:
+                current_low = entry["low_c"]
+                entry["low_c"] = round(
+                    temp_c if current_low is None else min(temp_c, current_low), 2
+                )
+
+        if not daily:
+            return None
+
+        result: dict = {
+            "city": city,
+            "source": "weather.gov",
+            "source_url": forecast_url,
+            "forecast_days": list(daily.values()),
+        }
+        if target_date and target_date in daily:
+            result["forecast_high_c"] = daily[target_date].get("high_c")
+            result["forecast_low_c"] = daily[target_date].get("low_c")
+
+        alert = _get_weathergov_alert(lat, lon)
+        if alert:
+            result["alert"] = alert
+        return result
+    except Exception as exc:
+        log.debug("[research] weather.gov fetch error for %s: %s", city, exc)
+        return None
+
+
+def _get_weathergov_alert(lat: float, lon: float) -> str | None:
+    """Best-effort headline of the most relevant active weather.gov alert.
+
+    Returns the ``event`` (e.g. "Heat Advisory") of the first active alert for
+    the point, or ``None`` when there are no alerts or the lookup fails. Never
+    raises — alerts are a nice-to-have, not required for the forecast.
+    """
+    try:
+        resp = httpx.get(
+            "https://api.weather.gov/alerts/active",
+            params={"point": f"{lat},{lon}"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        features = resp.json().get("features", [])
+        for feature in features:
+            event = (feature.get("properties", {}) or {}).get("event")
+            if event:
+                return str(event)
+        return None
+    except Exception as exc:
+        log.debug("[research] weather.gov alert error for %s,%s: %s", lat, lon, exc)
+        return None
+
+
 def _normalize_city_name(value: str) -> str:
     normalized = re.sub(r"[^a-zA-Z .'-]", " ", value.lower())
     normalized = re.sub(r"\s+", " ", normalized)
@@ -330,6 +440,15 @@ def _get_weather_research(question: str) -> dict | None:
                     else:
                         result["target_in_range"] = False
                         result["target_range_distance_c"] = round(forecast_high - float(high_c), 3)
+
+        # For US locations, also pull the official weather.gov forecast as a
+        # secondary source. Best-effort: a None result simply omits the field
+        # and leaves the Open-Meteo payload (and behavior) untouched.
+        if is_us:
+            weathergov = _get_weathergov_research(city, coords, target_date)
+            if weathergov:
+                result["weathergov"] = weathergov
+
         cache_set(_CACHE, question, result)
         return result
     except Exception as e:
@@ -350,7 +469,7 @@ def fetch_weather_forecast(question: str) -> dict:
         if identity:
             return {"error": "no forecast available", **identity}
         return {"error": "could not parse a city/date from the question"}
-    return {
+    result = {
         "city": research.get("city"),
         "date": research.get("target_date"),
         "target": {
@@ -368,3 +487,17 @@ def fetch_weather_forecast(question: str) -> dict:
         "forecast_days": research.get("forecast_days", []),
         "source": research.get("source", "open-meteo"),
     }
+    # Secondary US source: present only when the location is in the US and
+    # weather.gov returned usable data. Absent for non-US / on error, so
+    # Open-Meteo consumers see exactly the same shape as before.
+    weathergov = research.get("weathergov")
+    if weathergov:
+        result["weathergov"] = {
+            "forecast_high_c": weathergov.get("forecast_high_c"),
+            "forecast_low_c": weathergov.get("forecast_low_c"),
+            "source": weathergov.get("source", "weather.gov"),
+            "source_url": weathergov.get("source_url"),
+        }
+        if weathergov.get("alert"):
+            result["weathergov"]["alert"] = weathergov["alert"]
+    return result

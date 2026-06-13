@@ -1,0 +1,15 @@
+{
+  "properties": {
+    "gridId": "OKX",
+    "gridX": 33,
+    "gridY": 35,
+    "forecast": "https://api.weather.gov/gridpoints/OKX/33,35/forecast",
+    "forecastHourly": "https://api.weather.gov/gridpoints/OKX/33,35/forecast/hourly",
+    "relativeLocation": {
+      "properties": {
+        "city": "New York",
+        "state": "NY"
+      }
+    }
+  }
+}

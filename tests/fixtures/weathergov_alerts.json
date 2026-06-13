@@ -1,0 +1,11 @@
+{
+  "features": [
+    {
+      "properties": {
+        "event": "Heat Advisory",
+        "headline": "Heat Advisory issued June 20 by NWS New York NY",
+        "severity": "Moderate"
+      }
+    }
+  ]
+}
