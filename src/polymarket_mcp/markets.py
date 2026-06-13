@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import datetime
 import json
 import logging
 import re
@@ -11,6 +12,27 @@ import httpx
 from . import config
 
 log = logging.getLogger(__name__)
+
+
+def _hours_until(end_date: str) -> float | None:
+    """Hours from now (UTC) until an ISO-8601 ``end_date``; None if unparseable.
+
+    Negative when the close time is already past (e.g. an active-but-overdue
+    market). Used so callers can target soon-resolving markets.
+    """
+    if not end_date:
+        return None
+    raw = end_date.strip()
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        dt = datetime.datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    now = datetime.datetime.now(datetime.timezone.utc)
+    return round((dt - now).total_seconds() / 3600.0, 2)
 
 
 @dataclass
@@ -30,6 +52,11 @@ class Market:
     def implied_probability(self) -> float:
         return self.yes_price
 
+    @property
+    def hours_to_close(self) -> float | None:
+        """Hours from now until the market closes (None if unparseable)."""
+        return _hours_until(self.end_date)
+
     def to_dict(self) -> dict:
         return {
             "market_id": self.condition_id,
@@ -39,6 +66,7 @@ class Market:
             "no_price": self.no_price,
             "volume": self.volume,
             "end_date": self.end_date,
+            "hours_to_close": self.hours_to_close,
             "active": self.active,
             "tokens": self.tokens,
             "is_binary": self.is_binary,

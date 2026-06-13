@@ -39,9 +39,19 @@ _P_CEIL = 1.0 - 1e-6
 # Number of calibration buckets: deciles over [0, 1].
 _N_BUCKETS = 10
 
-# Minimum resolved trades in a decile bucket before we trust its empirical win
-# rate enough to calibrate toward it. Below this we fall back to the raw prob.
+# Minimum TOTAL resolved trades before calibration kicks in at all. Below this
+# there is too little history to trust, so we fall back to the raw prob.
 _MIN_CALIBRATION_SAMPLES = 5
+
+# Beta-shrinkage prior strength (pseudo-count): a sparse bucket's empirical win
+# rate is pulled toward the global base rate with this much weight, so thin
+# buckets don't over-react. ~5 means a bucket needs ~5 in-bucket trades to move
+# roughly halfway from the base rate to its own empirical rate.
+_CALIBRATION_PRIOR_STRENGTH = 5.0
+
+# Fractional weight given to each immediate neighbor bucket when smoothing a thin
+# target bucket (borrowing strength from adjacent deciles).
+_CALIBRATION_NEIGHBOR_WEIGHT = 0.5
 
 
 def _chosen_side_prob(decision: str, fair_prob: float) -> float:
@@ -264,20 +274,28 @@ def calibrate_probability(fair_prob: float, mode: str | None = None) -> dict:
     and, for each, the predicted probability that its CHOSEN side won
     (``fair_prob`` for ``buy_yes``, ``1 - fair_prob`` for ``buy_no``). It buckets
     those predictions into the same deciles as :func:`scorecard`'s calibration
-    table, finds the bucket that ``fair_prob`` itself falls in, and reports the
-    historical actual win rate (``pnl > 0``) of past predictions in that bucket
-    as the ``calibrated`` probability.
+    table and estimates the historical win rate of the bucket that ``fair_prob``
+    falls in — but, unlike a raw bucket win rate, it makes that estimate robust at
+    low sample sizes two ways:
 
-    Min-sample guard: if the bucket has fewer than ``_MIN_CALIBRATION_SAMPLES``
-    (5) resolved trades — including an empty DB — there is too little history to
-    trust, so ``calibrated`` equals ``raw`` and the note explains the fallback.
-    At or above the threshold we calibrate fully to the bucket's empirical win
-    rate. Never raises and never divides by zero; a non-finite or out-of-range
-    ``fair_prob`` is clamped to [0, 1] first.
+    * **Neighbor smoothing** — the two adjacent decile buckets contribute at
+      ``_CALIBRATION_NEIGHBOR_WEIGHT`` (0.5) each, so a thin target bucket borrows
+      strength from its neighbors instead of swinging on one or two trades.
+    * **Beta shrinkage** — the smoothed win rate is pulled toward the GLOBAL base
+      rate (overall win rate across all resolved trades) with a Beta prior of
+      strength ``_CALIBRATION_PRIOR_STRENGTH`` (5 pseudo-counts):
+      ``calibrated = (wins + k·base) / (total + k)``. Sparse buckets stay near the
+      base rate; well-populated buckets approach their own empirical rate.
+
+    Global guard: with fewer than ``_MIN_CALIBRATION_SAMPLES`` (5) resolved trades
+    in total — including an empty DB — there is too little history to trust, so
+    ``calibrated`` equals ``raw``. Never raises and never divides by zero; a
+    non-finite or out-of-range ``fair_prob`` is clamped to [0, 1] first.
 
     Returns a JSON-serializable dict::
 
-        {"raw": <input>, "calibrated": <float>, "samples": <int>, "note": <str>}
+        {"raw": <input>, "calibrated": <float>, "samples": <in-bucket count>,
+         "base_rate": <float|None>, "note": <str>}
     """
     try:
         raw = float(fair_prob)
@@ -301,34 +319,65 @@ def calibrate_probability(fair_prob: float, mode: str | None = None) -> dict:
     finally:
         conn.close()
 
-    # Tally wins/total of past predictions whose chosen-side prob shares a decile
-    # with the input. ``_bucket_index`` clamps, so no overflow on edge probs.
-    bucket_total = 0
-    bucket_wins = 0
+    # Per-bucket win/total of past predictions' chosen-side prob (and the global
+    # base rate). ``_bucket_index`` clamps, so no overflow on edge probs.
+    wins = [0] * _N_BUCKETS
+    totals = [0] * _N_BUCKETS
+    global_wins = 0
     for r in rows:
         pred = _chosen_side_prob(r["decision"], r["fair_prob"])
-        if _bucket_index(pred) != target_bucket:
-            continue
-        bucket_total += 1
+        b = _bucket_index(pred)
+        totals[b] += 1
         if r["pnl"] > 0:
-            bucket_wins += 1
+            wins[b] += 1
+            global_wins += 1
 
-    if bucket_total < _MIN_CALIBRATION_SAMPLES:
+    total = len(rows)
+    target_total = totals[target_bucket]
+
+    if total < _MIN_CALIBRATION_SAMPLES:
         return {
             "raw": raw,
             "calibrated": raw,
-            "samples": bucket_total,
+            "samples": target_total,
+            "base_rate": None,
             "note": "insufficient history (n<5) — using raw",
         }
 
-    empirical = bucket_wins / bucket_total  # bucket_total >= 5, no div-by-zero
+    base = global_wins / total  # total >= 5, no div-by-zero
+
+    # Neighbor-smoothed counts: target bucket at full weight, immediate neighbors
+    # at the neighbor weight (borrow strength from adjacent deciles).
+    eff_wins = float(wins[target_bucket])
+    eff_total = float(target_total)
+    for nb in (target_bucket - 1, target_bucket + 1):
+        if 0 <= nb < _N_BUCKETS:
+            eff_wins += _CALIBRATION_NEIGHBOR_WEIGHT * wins[nb]
+            eff_total += _CALIBRATION_NEIGHBOR_WEIGHT * totals[nb]
+
+    # No evidence in the target bucket OR its neighbors: we have history, but none
+    # about this probability region, so don't recalibrate — keep the raw value
+    # rather than yanking it to the global base rate.
+    if eff_total == 0:
+        return {
+            "raw": raw,
+            "calibrated": raw,
+            "samples": target_total,
+            "base_rate": round(base, 6),
+            "note": "no nearby resolved history — using raw",
+        }
+
+    # Beta shrinkage toward the base rate.
+    k = _CALIBRATION_PRIOR_STRENGTH
+    calibrated = _clamp01((eff_wins + k * base) / (eff_total + k))
     return {
         "raw": raw,
-        "calibrated": _clamp01(empirical),
-        "samples": bucket_total,
+        "calibrated": round(calibrated, 6),
+        "samples": target_total,
+        "base_rate": round(base, 6),
         "note": (
-            f"calibrated to bucket win rate {empirical:.2%} "
-            f"over {bucket_total} resolved trades"
+            f"beta-shrunk toward base rate {base:.1%} (prior k={k:g}, "
+            f"neighbor-smoothed); {target_total} in-bucket of {total} resolved"
         ),
     }
 

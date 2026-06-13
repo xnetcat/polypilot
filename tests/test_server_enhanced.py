@@ -251,12 +251,15 @@ def test_calibrate_probability_thin_history_falls_back_to_raw(srv):
     assert out["raw"] == 0.62
     assert out["calibrated"] == 0.62
     assert out["samples"] == 0
+    assert out["base_rate"] is None
     assert "insufficient history" in out["note"]
 
 
 def test_calibrate_probability_calibrates_over_seeded_bucket(srv):
     # Seed >=5 resolved buy_yes trades whose fair_prob sits in the 0.6-0.7 decile,
-    # with 3 wins / 2 losses, so the bucket's empirical win rate is 0.6.
+    # with 3 wins / 2 losses. The bucket's empirical win rate is 0.6 and the global
+    # base rate is also 0.6 (all trades are in this one bucket), so beta-shrinkage
+    # toward the base rate leaves calibrated exactly at 0.6: (3 + k·0.6)/(5 + k) = 0.6.
     outcomes = [(1.0, 12.0), (1.0, 12.0), (1.0, 12.0), (0.0, -10.0), (0.0, -10.0)]
     for i, (res, pnl) in enumerate(outcomes):
         mid = f"m{i}"
@@ -268,8 +271,41 @@ def test_calibrate_probability_calibrates_over_seeded_bucket(srv):
     out = srv.calibrate_probability(0.62)  # 0.62 lands in the 0.6-0.7 bucket
     assert out["raw"] == 0.62
     assert out["samples"] == 5
-    assert out["calibrated"] == 0.6  # 3 wins / 5
-    assert "calibrated to bucket win rate" in out["note"]
+    assert out["calibrated"] == 0.6
+    assert out["base_rate"] == 0.6
+    assert "beta-shrunk toward base rate" in out["note"]
+
+
+def test_calibrate_probability_shrinks_sparse_bucket_toward_base(srv):
+    # 10 resolved trades; the SPARSE high bucket (0.9-1.0) has just 1 win out of 1.
+    # Naive empirical would be 1.0, but beta-shrinkage toward the global base rate
+    # must pull it strictly below 1.0, proving shrinkage is active.
+    # Bucket 0.6-0.7: 6 buy_yes @0.65, all WIN.
+    for i in range(6):
+        mid = f"a{i}"
+        srv._state.record_evaluation("paper", market_id=mid, question="Q",
+            category="crypto", keywords="k", decision="buy_yes", side="YES",
+            confidence=0.7, fair_prob=0.65, yes_price=0.6, thesis="t", stake_usd=10.0)
+        srv._state.update_evaluation_outcome("paper", mid, "YES", 1.0, 6.0)
+    # Bucket 0.3-0.4: 3 buy_yes @0.35, all LOSE.
+    for i in range(3):
+        mid = f"b{i}"
+        srv._state.record_evaluation("paper", market_id=mid, question="Q",
+            category="crypto", keywords="k", decision="buy_yes", side="YES",
+            confidence=0.4, fair_prob=0.35, yes_price=0.35, thesis="t", stake_usd=10.0)
+        srv._state.update_evaluation_outcome("paper", mid, "YES", 0.0, -10.0)
+    # Bucket 0.9-1.0: a single WIN (neighbor 0.8-0.9 is empty).
+    srv._state.record_evaluation("paper", market_id="c0", question="Q",
+        category="crypto", keywords="k", decision="buy_yes", side="YES",
+        confidence=0.95, fair_prob=0.95, yes_price=0.9, thesis="t", stake_usd=10.0)
+    srv._state.update_evaluation_outcome("paper", "c0", "YES", 1.0, 1.0)
+
+    out = srv.calibrate_probability(0.95)  # lands in the sparse 0.9-1.0 bucket
+    assert out["raw"] == 0.95
+    assert out["samples"] == 1                 # one in-bucket trade
+    assert out["base_rate"] == 0.7             # 7 wins / 10 resolved
+    # (wins + k·base)/(total + k) = (1 + 5·0.7)/(1 + 5) = 0.75 — between base and 1.0.
+    assert out["calibrated"] == 0.75
 
 
 def test_calibrate_probability_delegates_to_replay(srv, monkeypatch):
@@ -395,6 +431,35 @@ def test_list_markets_binary_only_filters_multi_outcome(srv, monkeypatch):
     assert bin_out["count"] == 1
     assert bin_out["markets"][0]["market_id"] == "b1"
     assert bin_out["markets"][0]["is_binary"] is True
+
+
+def test_list_markets_closing_within_hours_filter(srv, monkeypatch):
+    import datetime
+
+    def _iso(hours_from_now):
+        return (datetime.datetime.now(datetime.timezone.utc)
+                + datetime.timedelta(hours=hours_from_now)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    soon = Market(
+        condition_id="soon", question="Resolves soon?", category="crypto",
+        yes_price=0.5, no_price=0.5, volume=5000.0, end_date=_iso(6),
+        active=True, tokens=[{"token_id": "t", "outcome": "Yes", "price": 0.5}])
+    far = Market(
+        condition_id="far", question="Resolves later?", category="crypto",
+        yes_price=0.5, no_price=0.5, volume=9000.0, end_date=_iso(72),
+        active=True, tokens=[{"token_id": "t", "outcome": "Yes", "price": 0.5}])
+    monkeypatch.setattr(srv._markets, "fetch_active_markets",
+                        lambda *a, **k: [far, soon])
+
+    # No filter -> both; each dict carries hours_to_close.
+    all_out = srv.list_markets()
+    assert {m["market_id"] for m in all_out["markets"]} == {"soon", "far"}
+    assert all(m["hours_to_close"] is not None for m in all_out["markets"])
+
+    # closing_within_hours=24 -> only the market resolving in ~6h.
+    near = srv.list_markets(closing_within_hours=24)
+    assert near["count"] == 1
+    assert near["markets"][0]["market_id"] == "soon"
 
 
 # --------------------------------------------------------------------------- #
@@ -617,3 +682,71 @@ def test_get_esports_delegates_to_fetch_esports(srv, monkeypatch):
     out = srv.get_esports("OG vs Liquid Dota 2")
     assert out is sentinel
     assert captured["question"] == "OG vs Liquid Dota 2"
+
+
+# --------------------------------------------------------------------------- #
+# check_data_sources -> diagnostics.check_data_sources
+# --------------------------------------------------------------------------- #
+class _DiagResp:
+    def __init__(self, status_code=200):
+        self.status_code = status_code
+
+
+def test_check_data_sources_probe_false_makes_no_network(srv, monkeypatch):
+    # probe=False must be a pure config readout — zero network calls.
+    monkeypatch.setattr(srv._diagnostics.httpx, "get",
+        lambda *a, **k: pytest.fail("no network call expected with probe=False"))
+    out = srv.check_data_sources(probe=False)
+    assert out["probed"] is False
+    names = {s["name"] for s in out["sources"]}
+    assert {"coingecko", "binance", "open-meteo", "fred", "pandascore"} <= names
+    assert all(s["reachable"] is None for s in out["sources"])
+    assert out["summary"]["total"] == len(out["sources"])
+
+
+def test_check_data_sources_probes_keyless_and_skips_unconfigured_keys(srv, monkeypatch):
+    # conftest wipes research keys, so fred/pandascore/newsapi are unconfigured.
+    monkeypatch.setattr(srv._diagnostics.httpx, "get",
+                        lambda url, **k: _DiagResp(200))
+    out = srv.check_data_sources(probe=True)
+    assert out["probed"] is True
+    by_name = {s["name"]: s for s in out["sources"]}
+
+    # Keyless sources get probed and report reachable on a 2xx.
+    for name in ("coingecko", "binance", "open-meteo", "weather.gov", "espn", "rss"):
+        assert by_name[name]["requires_key"] is False
+        assert by_name[name]["reachable"] is True
+        assert by_name[name]["status"] == 200
+
+    # Keyed-but-unconfigured sources are reported, NOT probed.
+    for name in ("fred", "pandascore", "newsapi"):
+        assert by_name[name]["requires_key"] is True
+        assert by_name[name]["key_configured"] is False
+        assert by_name[name]["reachable"] is None
+
+    assert out["summary"]["keyed_configured"] == 0
+    assert out["summary"]["reachable"] == 6
+
+
+def test_check_data_sources_probes_configured_key(srv, monkeypatch):
+    # With a PandaScore key configured, that source is probed too.
+    monkeypatch.setattr(srv._diagnostics.config, "PANDASCORE_KEY", "k-123")
+    monkeypatch.setattr(srv._diagnostics.httpx, "get",
+                        lambda url, **k: _DiagResp(200))
+    out = srv.check_data_sources(probe=True)
+    by_name = {s["name"]: s for s in out["sources"]}
+    assert by_name["pandascore"]["key_configured"] is True
+    assert by_name["pandascore"]["reachable"] is True
+    assert out["summary"]["keyed_configured"] == 1
+
+
+def test_check_data_sources_marks_unreachable_on_error(srv, monkeypatch):
+    # A probe that raises must be caught and reported as not reachable, no raise.
+    def _boom(*a, **k):
+        raise RuntimeError("connection refused")
+    monkeypatch.setattr(srv._diagnostics.httpx, "get", _boom)
+    out = srv.check_data_sources(probe=True)
+    by_name = {s["name"]: s for s in out["sources"]}
+    assert by_name["coingecko"]["reachable"] is False
+    assert "connection refused" in str(by_name["coingecko"]["status"])
+    assert out["summary"]["reachable"] == 0

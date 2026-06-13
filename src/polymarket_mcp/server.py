@@ -4,6 +4,7 @@ from __future__ import annotations
 from mcp.server.fastmcp import FastMCP
 
 from . import analytics as _analytics
+from . import diagnostics as _diagnostics
 from . import execution as _execution
 from . import markets as _markets
 from . import notifications as _notifications
@@ -48,20 +49,37 @@ def ping() -> dict:
     return {"status": "ok", "service": "polypilot-mcp"}
 
 
+@mcp.tool()
+def check_data_sources(probe: bool = True) -> dict:
+    """Diagnose which research data sources are configured and reachable.
+
+    Reports every external source the research tools use (CoinGecko, Binance,
+    Open-Meteo, weather.gov, ESPN, RSS, FRED, PandaScore, NewsAPI): whether it
+    needs an API key, whether that key is configured, and — when `probe=True`
+    (default) — whether the endpoint currently responds. Keyed sources without a
+    key are reported but not probed. Set `probe=False` for a fast, network-free
+    config-only check. Use this to confirm a newly-added key works or to see why
+    a research tool is returning errors (e.g. CoinGecko rate-limiting)."""
+    return _diagnostics.check_data_sources(probe=probe)
+
+
 # --- Market data tools ---
 
 
 @mcp.tool()
 def list_markets(limit: int = 50, category: str | None = None,
                  min_volume: float = 0.0, keyword: str | None = None,
-                 binary_only: bool = False) -> dict:
+                 binary_only: bool = False,
+                 closing_within_hours: float | None = None) -> dict:
     """Discover active Polymarket markets sorted by volume — binary (YES/NO) AND
-    multi-outcome by default. Each market dict carries `is_binary` plus an
-    `outcomes` list ([{outcome, token_id, price}, ...]) so multi-outcome data
-    flows through automatically. Optionally filter by category (e.g.
-    'weather','crypto','sports'), minimum USD volume, or a keyword in the
-    question. Set `binary_only=True` to return only YES/NO markets. Returns a
-    list of market dicts."""
+    multi-outcome by default. Each market dict carries `is_binary`, an `outcomes`
+    list ([{outcome, token_id, price}, ...]) so multi-outcome data flows through
+    automatically, and `hours_to_close` (hours until the market resolves; null if
+    unknown). Optionally filter by category (e.g. 'weather','crypto','sports'),
+    minimum USD volume, or a keyword in the question. Set `binary_only=True` to
+    return only YES/NO markets. Set `closing_within_hours` (e.g. 24) to keep only
+    markets resolving within that many hours — useful for targeting soon-settling
+    markets for faster capital turnover. Returns a list of market dicts."""
     found = _markets.fetch_active_markets(limit=max(limit, 50))
     out = []
     for m in found:
@@ -73,6 +91,10 @@ def list_markets(limit: int = 50, category: str | None = None,
             continue
         if keyword and keyword.lower() not in m.question.lower():
             continue
+        if closing_within_hours is not None:
+            h = m.hours_to_close
+            if h is None or h > closing_within_hours:
+                continue
         out.append(m.to_dict())
     return {"count": len(out[:limit]), "markets": out[:limit]}
 

@@ -10,6 +10,7 @@ import pytest
 # The full, exact tool surface the server is expected to expose.
 EXPECTED_TOOLS = {
     "ping",
+    "check_data_sources",
     "list_markets",
     "get_market",
     "get_order_book",
@@ -73,11 +74,11 @@ def _registered_tool_names(server) -> set[str]:
 
 
 def test_registered_tool_set_is_exactly_expected(srv):
-    """The server must register exactly the 40 expected tools — no more, no
+    """The server must register exactly the 41 expected tools — no more, no
     fewer. A drifted set (renamed/added/removed tool) fails here."""
     names = _registered_tool_names(srv)
     assert names == EXPECTED_TOOLS
-    assert len(names) == 40
+    assert len(names) == 41
 
 
 def test_every_tool_resolves_to_callable_attribute(srv):

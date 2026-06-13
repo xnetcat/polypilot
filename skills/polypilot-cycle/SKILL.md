@@ -17,6 +17,13 @@ skill apply here unchanged — read `skills/polypilot/SKILL.md` and its
 `references/` for the full rules. This file only changes the *control flow* (one
 pass, no waiting), not the rules or who decides.
 
+In particular, the **"Category edges (priors from prior testing)"** note in the
+main skill applies here too: lean into weather (the one category that consistently
+profited in predecessor testing), and raise the edge bar / size smaller on
+crypto, sports, and politics — always confirming against your own
+`get_performance_stats()` / `get_scorecard()` rather than trusting the inherited
+prior blindly.
+
 ## Hard rules (non-negotiable — same as the main skill)
 - The kill-switch is enforced in code. If `get_risk_status()` reports
   `breaker_tripped: true`, **do not trade**: report that the breaker is tripped

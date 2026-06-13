@@ -1,12 +1,19 @@
 # Weather market playbook
 
-Weather has historically been the most reliable category: the resolution data is
-objective (forecast highs from real APIs) and you can cross-reference multiple
-sources. The edge comes from markets that price a temperature outcome far from
-where the forecast actually sits. The recurring winning shape was buying **NO on
-an exact-temperature market when the forecast missed the target by several
-degrees** — but that is a pattern to recognize, not a rule to apply blindly. Read
-each question fresh.
+Weather has historically been the most reliable category — in predecessor
+(PolyDegen) paper/live testing it was the **one category that consistently made
+money**, while crypto, sports, and politics consistently lost. The resolution data
+is objective (forecast highs from real APIs) and you can cross-reference multiple
+sources, so an edge here is real and repeatable. The edge comes from markets that
+price a temperature outcome far from where the forecast actually sits. The
+recurring winning shape was buying **NO on an exact-temperature market when the
+forecast missed the target by several degrees** — the predecessor reported an
+~11/11 win streak on exactly that weather-NO exact-temp pattern. Treat that as
+strong encouragement to favor this category, but as a prior from a different
+system's limited sample, **not** a guarantee: it is a pattern to recognize, not a
+rule to apply blindly. Read each question fresh, and confirm the edge holds in
+YOUR own resolved record via `get_performance_stats()` / `get_scorecard()` —
+adjust if your data disagrees.
 
 ## Market types — parse the question carefully (direction errors are costly)
 - **Exact temp** ("highest temperature 22°C"): YES wins only if the high lands in

@@ -185,6 +185,7 @@ def test_to_dict_documented_keys_and_json_serializable():
         "no_price",
         "volume",
         "end_date",
+        "hours_to_close",
         "active",
         "tokens",
         "is_binary",

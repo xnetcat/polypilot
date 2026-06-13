@@ -202,12 +202,12 @@ A single cumulative-loss circuit breaker is the one rule enforced in code:
 Everything else — strategy, edge bar, position sizing, concentration, and
 timing — is the agent's judgment, not hardcoded.
 
-## Tool surface (40 tools)
+## Tool surface (41 tools)
 
 Grouped by purpose. The agent calls what it needs; all tools return plain JSON.
 
 **Markets**
-- `list_markets` — discover active binary markets (filter by category, min volume, keyword), sorted by volume.
+- `list_markets` — discover active markets (filter by category, min volume, keyword, `binary_only`, or `closing_within_hours` to target soon-resolving markets), sorted by volume. Each dict includes `hours_to_close`.
 - `get_market` — full detail for one market by condition id.
 - `get_order_book` — live order book summary for a CLOB token (best bid/ask, spread, midpoint, imbalance, top levels).
 - `get_price_history` — price-history summary for a token over an interval (first/last/high/low/change).
@@ -215,7 +215,7 @@ Grouped by purpose. The agent calls what it needs; all tools return plain JSON.
 
 **Research**
 - `get_weather_forecast` — structured forecast (high/low °C, uncertainty) for **any city** parsed from a weather market question; a city catalog is the fast path, with Open-Meteo geocoding resolving anything else (Open-Meteo + weather.gov).
-- `get_crypto` — spot price, 24h change, recent history, the threshold direction for the market's target, and (for range/threshold markets) a lognormal `probability` estimate of the target band. Resolves **any listed coin** — a curated alias map short-circuits common coins, and CoinGecko `/search` covers the long tail.
+- `get_crypto` — spot price, 24h change, recent history, the threshold direction for the market's target, and (for range/threshold markets) a lognormal `probability` estimate of the target band. Resolves **any listed coin** — a curated alias map short-circuits common coins, and CoinGecko `/search` covers the long tail. Falls back to Binance's public API for spot + candles when CoinGecko is rate-limited (HTTP 429) or down.
 - `get_sports` — ESPN-backed sport/teams/status/score for a sports market.
 - `get_esports` — PandaScore-backed game/teams/match-status/score for an esports market (CS2/CS:GO, Dota 2, LoL, Valorant, Overwatch, Rocket League); requires `POLYPILOT_PANDASCORE_KEY`, otherwise returns an error dict so the agent falls back to web search.
 - `get_economic_data` — FRED-backed official economic series (requires `FRED_API_KEY`).
@@ -244,7 +244,7 @@ Grouped by purpose. The agent calls what it needs; all tools return plain JSON.
 
 **Backtesting / calibration**
 - `get_scorecard` — decision-quality scorecard over your resolved trades (win rate, ROI, Brier score, log loss, and a 10-bucket calibration table), overall and per category; consult it to calibrate your own confidence.
-- `calibrate_probability` — shade a raw fair-prob using your own resolved-trade calibration (the bucket's historical win rate); falls back to the raw value when history is thin (`{raw, calibrated, samples, note}`).
+- `calibrate_probability` — shade a raw fair-prob using your own resolved-trade calibration: the decile bucket's win rate, **neighbor-smoothed** (adjacent deciles borrow strength) and **beta-shrunk toward your global base rate** so thin buckets don't over-react. Falls back to the raw value when history is thin or there's none near that probability (`{raw, calibrated, samples, base_rate, note}`).
 - `list_resolved_markets` — recently resolved real markets with their winning outcome, to backtest/practice forecasting against.
 
 **Portfolio / Memory**
@@ -259,6 +259,7 @@ Grouped by purpose. The agent calls what it needs; all tools return plain JSON.
 **Safety / Pacing**
 - `get_risk_status` — cash, PnL vs. kill-switch limits, breaker state, mode. (Call first each cycle.)
 - `wait_for_next_cycle` — server-side sleep that paces the loop and may return early if a held position nears resolution.
+- `check_data_sources` — diagnose which research APIs are configured (keys) and reachable (CoinGecko/Binance/Open-Meteo/weather.gov/ESPN/RSS/FRED/PandaScore/NewsAPI). `probe=False` for a fast config-only check. Use it to confirm a newly-added key works or to see why a research tool is erroring.
 - `ping` — health check.
 
 **Notifications**

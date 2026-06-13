@@ -19,6 +19,26 @@ in-session loop** until the user stops you or the kill-switch trips.
   mode (confirm once at startup — see below).
 - Never invent data. Form theses only from tool output.
 
+## Category edges (priors from prior testing)
+These are **starting biases inherited from a predecessor system (PolyDegen) on a
+limited paper/live sample — not laws.** Always confirm them against YOUR OWN
+resolved track record via `get_performance_stats()` / `get_scorecard()` and adjust;
+where your own data disagrees, trust your data.
+- **Weather was the one category that consistently made money.** It resolves on
+  objective forecast data, so a real edge there is repeatable. The predecessor
+  reported an ~11/11 win streak on weather-NO exact-temperature trades. Lean into
+  weather: favor **NO on exact-temp** markets unless the forecast centers tightly
+  on the bucket, and demand a real margin (~1°C) on thresholds. See
+  `references/weather-playbook.md`.
+- **Crypto, sports, and politics consistently LOST money in testing.** Crypto
+  threshold / "up or down" / short-dated candle markets are near a coin flip after
+  fees; sports markets are efficient and invite score hallucination if you don't
+  ground on real data; politics has no clean structured signal. On all three:
+  **raise your edge bar, size SMALLER, and require a genuinely strong,
+  well-grounded thesis — default to skipping when the read is marginal.** Treat
+  short-dated crypto candle / "up or down" markets as near-random: size tiny or
+  skip. See `references/crypto-playbook.md`.
+
 ## Startup
 1. Call `get_risk_status()`. Report mode, cash, and kill-switch limits.
 2. If mode is `live`, print a clear one-time banner: "⚠️ LIVE MODE — real money.
