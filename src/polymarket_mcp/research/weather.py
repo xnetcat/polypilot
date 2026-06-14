@@ -12,6 +12,7 @@ from datetime import datetime
 import httpx
 
 from ._cache import _MISS, DEFAULT_TTL_SECONDS, cache_get, cache_set
+from ._concurrent import gather
 
 log = logging.getLogger(__name__)
 
@@ -179,6 +180,91 @@ def _get_weathergov_alert(lat: float, lon: float) -> str | None:
         return None
     except Exception as exc:
         log.debug("[research] weather.gov alert error for %s,%s: %s", lat, lon, exc)
+        return None
+
+
+# MET Norway requires a descriptive User-Agent on every request (it returns
+# 403 otherwise) and rounds coordinates to <=4 decimals to keep its cache hot.
+_METNO_FORECAST_URL = (
+    "https://api.met.no/weatherapi/locationforecast/2.0/compact"
+)
+_METNO_HEADERS = {
+    "User-Agent": "polypilot-mcp/1.0 (github.com/xnetcat/polypilot)",
+}
+
+
+def _get_metno_research(
+    coords: tuple[float, float], target_date: str | None
+) -> dict | None:
+    """Secondary worldwide forecast from MET Norway (api.met.no).
+
+    Pulls the ``locationforecast`` compact timeseries for ``coords`` and reduces
+    it to per-date highs / lows in °C: each entry carries an instant
+    ``air_temperature``, so grouping by calendar date and taking the max / min
+    yields the daily high / low. Applies to every location (US or not), giving
+    non-US markets a second source to cross-check against Open-Meteo. Best-effort:
+    any HTTP/parse failure (or empty timeseries) returns ``None`` and the caller
+    falls back to Open-Meteo alone — this never raises.
+    """
+    try:
+        lat, lon = coords
+        resp = httpx.get(
+            _METNO_FORECAST_URL,
+            params={"lat": round(lat, 4), "lon": round(lon, 4)},
+            headers=_METNO_HEADERS,
+            timeout=10,
+        )
+        resp.raise_for_status()
+        timeseries = (
+            resp.json().get("properties", {}).get("timeseries", [])
+        )
+        if not timeseries:
+            return None
+
+        # Group the (sub-daily) instant air temperatures by calendar date; the
+        # high is the warmest reading that day and the low the coldest.
+        daily: dict[str, dict] = {}
+        for entry in timeseries:
+            time_value = entry.get("time")
+            if not time_value:
+                continue
+            date_value = time_value[:10]
+            temp_raw = (
+                entry.get("data", {})
+                .get("instant", {})
+                .get("details", {})
+                .get("air_temperature")
+            )
+            if temp_raw is None:
+                continue
+            try:
+                temp = float(temp_raw)
+            except (TypeError, ValueError):
+                continue
+            day = daily.setdefault(
+                date_value, {"date": date_value, "high_c": temp, "low_c": temp}
+            )
+            day["high_c"] = max(day["high_c"], temp)
+            day["low_c"] = min(day["low_c"], temp)
+
+        if not daily:
+            return None
+
+        for day in daily.values():
+            day["high_c"] = round(day["high_c"], 2)
+            day["low_c"] = round(day["low_c"], 2)
+
+        result: dict = {
+            "source": "met.no",
+            "source_url": _METNO_FORECAST_URL,
+            "forecast_days": list(daily.values()),
+        }
+        if target_date and target_date in daily:
+            result["forecast_high_c"] = daily[target_date]["high_c"]
+            result["forecast_low_c"] = daily[target_date]["low_c"]
+        return result
+    except Exception as exc:
+        log.debug("[research] met.no fetch error for %s: %s", coords, exc)
         return None
 
 
@@ -491,13 +577,22 @@ def _get_weather_research(question: str) -> dict | None:
                         result["target_in_range"] = False
                         result["target_range_distance_c"] = round(forecast_high - float(high_c), 3)
 
-        # For US locations, also pull the official weather.gov forecast as a
-        # secondary source. Best-effort: a None result simply omits the field
-        # and leaves the Open-Meteo payload (and behavior) untouched.
-        if is_us:
-            weathergov = _get_weathergov_research(city, coords, target_date)
-            if weathergov:
-                result["weathergov"] = weathergov
+        # Secondary sources, fetched concurrently with each other (Open-Meteo
+        # above stays the primary): MET Norway worldwide, weather.gov for US
+        # locations only. Each is best-effort — a None result simply omits its
+        # field and leaves the Open-Meteo payload (and behavior) untouched.
+        metno, weathergov = gather(
+            lambda: _get_metno_research(coords, target_date),
+            (
+                (lambda: _get_weathergov_research(city, coords, target_date))
+                if is_us
+                else (lambda: None)
+            ),
+        )
+        if metno:
+            result["metno"] = metno
+        if weathergov:
+            result["weathergov"] = weathergov
 
         cache_set(_CACHE, question, result)
         return result
@@ -537,6 +632,17 @@ def fetch_weather_forecast(question: str) -> dict:
         "forecast_days": research.get("forecast_days", []),
         "source": research.get("source", "open-meteo"),
     }
+    # Secondary worldwide source: present whenever MET Norway returned usable
+    # data (US or not), giving non-US markets a second source to cross-check.
+    # Absent on error, so Open-Meteo-only consumers see the same shape as before.
+    metno = research.get("metno")
+    if metno:
+        result["metno"] = {
+            "forecast_high_c": metno.get("forecast_high_c"),
+            "forecast_low_c": metno.get("forecast_low_c"),
+            "source": metno.get("source", "met.no"),
+            "source_url": metno.get("source_url"),
+        }
     # Secondary US source: present only when the location is in the US and
     # weather.gov returned usable data. Absent for non-US / on error, so
     # Open-Meteo consumers see exactly the same shape as before.

@@ -31,6 +31,7 @@ import re
 import httpx
 
 from ._cache import _MISS, DEFAULT_TTL_SECONDS, cache_get, cache_set
+from ._concurrent import gather
 
 log = logging.getLogger(__name__)
 
@@ -300,6 +301,42 @@ def _fetch_daily_prices(coin_id: str) -> list[float]:
         return []
 
 
+def _fetch_spot_coingecko(coin_id: str) -> dict | None:
+    """Fetch spot/24h stats from CoinGecko's ``/simple/price`` endpoint.
+
+    ``coin_id`` is the CoinGecko id (e.g. ``"bitcoin"``). Returns ``{"price",
+    "change_24h_pct", "volume_24h_usd"}`` or ``None`` on any error (e.g. a 429
+    rate limit) or a non-positive price — mirroring ``_fetch_spot_binance`` so
+    the two sources are interchangeable at the call site.
+    """
+    if not coin_id:
+        return None
+    try:
+        resp = httpx.get(
+            "https://api.coingecko.com/api/v3/simple/price",
+            params={
+                "ids": coin_id,
+                "vs_currencies": "usd",
+                "include_24hr_change": "true",
+                "include_24hr_vol": "true",
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json().get(coin_id, {})
+        price = float(data.get("usd", 0) or 0)
+        if price <= 0:
+            return None
+        return {
+            "price": price,
+            "change_24h_pct": float(data.get("usd_24h_change", 0) or 0),
+            "volume_24h_usd": float(data.get("usd_24h_vol", 0) or 0),
+        }
+    except Exception as e:  # noqa: BLE001 — best-effort, never raise.
+        log.debug("[research] Crypto CoinGecko spot error: %s", e)
+        return None
+
+
 def _fetch_spot_binance(symbol: str) -> dict | None:
     """Fetch spot/24h stats from Binance's public ``ticker/24hr`` endpoint.
 
@@ -533,45 +570,56 @@ def _get_crypto_research(question: str) -> dict | None:
         return None
     coin_id, matched_keyword, symbol = resolved
 
-    # Primary spot source: CoinGecko /simple/price. On any error (e.g. 429 rate
-    # limit) or a non-positive price, fall through to the Binance public API.
-    price = change = vol = 0.0
-    source = "coingecko"
-    source_url = f"https://www.coingecko.com/en/coins/{coin_id}"
-    try:
-        resp = httpx.get(
-            "https://api.coingecko.com/api/v3/simple/price",
-            params={
-                "ids": coin_id,
-                "vs_currencies": "usd",
-                "include_24hr_change": "true",
-                "include_24hr_vol": "true",
-            },
-            timeout=10,
-        )
-        resp.raise_for_status()
-        data = resp.json().get(coin_id, {})
-        price = float(data.get("usd", 0) or 0)
-        change = float(data.get("usd_24h_change", 0) or 0)
-        vol = float(data.get("usd_24h_vol", 0) or 0)
-    except Exception as e:
-        log.debug("[research] Crypto CoinGecko spot error: %s", e)
-        price = 0.0
+    # Fetch BOTH spot sources concurrently for cross-source confidence: CoinGecko
+    # /simple/price and the Binance public API. gather() runs them in parallel
+    # threads and never raises (a failing/timed-out source contributes None).
+    cg, bn = gather(
+        lambda: _fetch_spot_coingecko(coin_id),
+        lambda: _fetch_spot_binance(symbol),
+    )
 
-    # Binance fallback when CoinGecko failed or returned an unusable price. Only
-    # the price/change/volume/source differ — all other result keys are shared.
-    if price <= 0:
-        binance = _fetch_spot_binance(symbol)
-        if binance is not None:
-            price = binance["price"]
-            change = binance["change_24h_pct"]
-            vol = binance["volume_24h_usd"]
-            source = "binance"
-            source_url = f"https://www.binance.com/en/trade/{(symbol or '').upper()}_USDT"
-
-    # Both providers failed -> preserve the original "no data" behaviour.
-    if price <= 0:
+    # Top-level spot prefers CoinGecko when present, else Binance; ``source`` and
+    # ``source_url`` follow whichever provided it.
+    if cg is not None:
+        price = cg["price"]
+        change = cg["change_24h_pct"]
+        vol = cg["volume_24h_usd"]
+        source = "coingecko"
+        source_url = f"https://www.coingecko.com/en/coins/{coin_id}"
+    elif bn is not None:
+        price = bn["price"]
+        change = bn["change_24h_pct"]
+        vol = bn["volume_24h_usd"]
+        source = "binance"
+        source_url = f"https://www.binance.com/en/trade/{(symbol or '').upper()}_USDT"
+    else:
+        # Both providers failed -> preserve the original "no data" behaviour.
         return None
+
+    # Per-source breakdown for cross-source confidence; an unavailable source is
+    # marked with an explicit error rather than being silently dropped.
+    sources: dict = {
+        "coingecko": {
+            "spot_usd": cg["price"],
+            "change_24h": cg["change_24h_pct"],
+            "volume_24h": cg["volume_24h_usd"],
+        } if cg is not None else {"error": "unavailable"},
+        "binance": {
+            "spot_usd": bn["price"],
+            "change_24h": bn["change_24h_pct"],
+            "volume_24h": bn["volume_24h_usd"],
+        } if bn is not None else {"error": "unavailable"},
+    }
+
+    # Relative gap between the two spots (percent of their mean); None unless both
+    # are present and positive. A large value flags a stale/illiquid quote.
+    spot_divergence_pct = None
+    if cg is not None and bn is not None:
+        cg_spot, bn_spot = cg["price"], bn["price"]
+        if cg_spot > 0 and bn_spot > 0:
+            spot_divergence_pct = round(
+                abs(cg_spot - bn_spot) / ((cg_spot + bn_spot) / 2) * 100, 3
+            )
 
     result: dict = {
         "coin_id": coin_id,
@@ -582,6 +630,8 @@ def _get_crypto_research(question: str) -> dict | None:
         "volume_24h_usd": vol,
         "source": source,
         "source_url": source_url,
+        "sources": sources,
+        "spot_divergence_pct": spot_divergence_pct,
     }
     price_match = re.search(r"\$?([\d,]+)", question.replace(",", ""))
     if price_match:
@@ -639,8 +689,11 @@ def fetch_crypto(question: str) -> dict:
     """Crypto spot price and 24h change/volume. Parses the asset from the question.
 
     Returns {symbol, coin_id, spot_usd, change_24h, volume_24h, target?,
-    probability?, source} or an {"error": ...} dict. The ``probability`` block
-    is an independent lognormal estimate of the band/threshold landing
+    probability?, source, source_url, sources, spot_divergence_pct} or an
+    {"error": ...} dict. ``sources`` carries each provider's spot/24h breakdown
+    (or {"error": "unavailable"}) and ``spot_divergence_pct`` is the relative gap
+    between the two spots (None unless both are present). The ``probability``
+    block is an independent lognormal estimate of the band/threshold landing
     probability and is omitted when it can't be computed (best-effort).
     """
     research = _get_crypto_research(question)
@@ -658,6 +711,8 @@ def fetch_crypto(question: str) -> dict:
         "market_type": research.get("market_type"),
         "source": research.get("source", "coingecko"),
         "source_url": research.get("source_url"),
+        "sources": research.get("sources"),
+        "spot_divergence_pct": research.get("spot_divergence_pct"),
     }
     if "target_price" in research:
         result["target"] = {

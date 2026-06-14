@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 import httpx
 
 from ._cache import _MISS, DEFAULT_TTL_SECONDS, cache_get, cache_set
+from ._concurrent import gather
 
 log = logging.getLogger(__name__)
 
@@ -384,14 +385,25 @@ def _get_sports_research(question: str) -> dict | None:
         log.debug("[research] Could not extract teams from: %s", question[:80])
         return None
     team1, team2 = teams
-    # Primary: ESPN (live scoreboards). Fallback: TheSportsDB (global coverage)
-    # when ESPN has no match — so the agent gets data from more than one source.
-    score_data = _get_espn_score_data(team1, team2, question)
-    source = "espn"
-    if not score_data:
-        score_data = _get_thesportsdb_data(team1, team2)
-        if score_data:
-            source = "thesportsdb"
+    # Query BOTH free sources concurrently (ESPN live scoreboards + TheSportsDB
+    # global coverage) so the agent gets cross-source confidence, not just a
+    # fallback. The slowest single source bounds the wall-clock; gather never
+    # raises (one failing source contributes None).
+    espn_sd, tsdb_sd = gather(
+        lambda: _get_espn_score_data(team1, team2, question),
+        lambda: _get_thesportsdb_data(team1, team2),
+    )
+    # Top-level score data prefers ESPN when it resolved (preserves the existing
+    # shape + behaviour), else TheSportsDB. ``source`` names whichever supplied it.
+    if espn_sd:
+        score_data = espn_sd
+        source = "espn"
+    elif tsdb_sd:
+        score_data = tsdb_sd
+        source = "thesportsdb"
+    else:
+        score_data = None
+        source = "espn"
     # The slug/league comes from the matched data when a game was found, else from
     # an explicit league keyword if the question named one.
     sport_slug = (score_data or {}).get("sport") or _detect_sport(question)
@@ -402,6 +414,26 @@ def _get_sports_research(question: str) -> dict | None:
         )
     else:
         source_url = f"{_TSDB_BASE}/searchevents.php"
+    # Per-source results plus a cross-source agreement summary (only meaningful
+    # when BOTH sources resolved a game).
+    sources = {"espn": espn_sd, "thesportsdb": tsdb_sd}
+    if espn_sd and tsdb_sd:
+        e_combined = espn_sd.get("combined_score")
+        t_combined = tsdb_sd.get("combined_score")
+        state_agree = espn_sd.get("state") == tsdb_sd.get("state")
+        combined_agree = (
+            e_combined is not None and t_combined is not None
+            and e_combined == t_combined
+        )
+        agreement = {"state": state_agree, "combined_score": combined_agree}
+        # Agree when states match and, where both report a combined score, those
+        # also match. A missing combined on either side doesn't count as conflict.
+        sources_agree = state_agree and (
+            combined_agree if (e_combined is not None and t_combined is not None) else True
+        )
+    else:
+        agreement = None
+        sources_agree = None
     result = {
         "team1": team1,
         "team2": team2,
@@ -410,6 +442,9 @@ def _get_sports_research(question: str) -> dict | None:
         "sport_slug": sport_slug,
         "espn_data": score_data,   # score data from whichever source matched
         "espn_summary": _format_espn_score_data(score_data) if score_data else "",
+        "sources": sources,        # per-source score data ({espn, thesportsdb})
+        "agreement": agreement,    # cross-source agreement (None if <2 resolved)
+        "sources_agree": sources_agree,
     }
     cache_set(_CACHE, question, result)
     return result
@@ -440,4 +475,7 @@ def fetch_sports(question: str) -> dict:
         "summary": research.get("espn_summary", ""),
         "source": research.get("source", "espn"),
         "source_url": research.get("source_url", ""),
+        "sources": research.get("sources"),
+        "agreement": research.get("agreement"),
+        "sources_agree": research.get("sources_agree"),
     }

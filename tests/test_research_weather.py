@@ -22,6 +22,24 @@ def _stub_response(payload):
     return R()
 
 
+# A minimal met.no-shaped timeseries: two readings on June 20 (high 28, low 19)
+# so the daily reduction has something to chew on without a fixture file.
+_METNO_PAYLOAD = {
+    "properties": {
+        "timeseries": [
+            {
+                "time": "2026-06-20T06:00:00Z",
+                "data": {"instant": {"details": {"air_temperature": 19.0}}},
+            },
+            {
+                "time": "2026-06-20T12:00:00Z",
+                "data": {"instant": {"details": {"air_temperature": 28.0}}},
+            },
+        ]
+    }
+}
+
+
 def test_fetch_weather_returns_forecast(monkeypatch):
     weather._CACHE.clear()
     weather._GEOCODE_CACHE.clear()
@@ -34,7 +52,11 @@ def test_fetch_weather_returns_forecast(monkeypatch):
                 pass
 
             def json(self):
-                return geo if "geocoding" in url else fc
+                if "geocoding" in url:
+                    return geo
+                if "api.met.no" in url:
+                    return _METNO_PAYLOAD
+                return fc
 
         return R()
 
@@ -100,7 +122,11 @@ def test_fetch_weather_geocodes_non_catalog_city(monkeypatch):
                     "temperature_2m_min": [25.0], "precipitation_sum": [1.2]}}
 
     def fake_get(url, *a, **k):
-        return _stub_response(geo if "geocoding" in url else fc)
+        if "geocoding" in url:
+            return _stub_response(geo)
+        if "api.met.no" in url:
+            return _stub_response(_METNO_PAYLOAD)
+        return _stub_response(fc)
 
     monkeypatch.setattr(weather.httpx, "get", fake_get)
     result = weather.fetch_weather_forecast("Will Lagos hit 35C on June 20?")
@@ -112,7 +138,7 @@ def test_fetch_weather_geocodes_non_catalog_city(monkeypatch):
 # --------------------------------------------------------------------------- #
 # weather.gov — secondary US source
 # --------------------------------------------------------------------------- #
-def _route_weather_get(geo, openmeteo, points, forecast, alerts):
+def _route_weather_get(geo, openmeteo, points, forecast, alerts, metno=None):
     """Build a fake httpx.get that routes by URL to the right fixture."""
 
     def fake_get(url, *a, **k):
@@ -120,6 +146,8 @@ def _route_weather_get(geo, openmeteo, points, forecast, alerts):
             return _stub_response(geo)
         if "api.open-meteo.com" in url:
             return _stub_response(openmeteo)
+        if "api.met.no" in url:
+            return _stub_response(metno if metno is not None else _METNO_PAYLOAD)
         if "/points/" in url:
             return _stub_response(points)
         if "/alerts/active" in url:
@@ -177,7 +205,11 @@ def test_non_us_city_has_no_weathergov_field(monkeypatch):
     def fake_get(url, *a, **k):
         # weather.gov must never be reached for a non-US location.
         assert "weather.gov" not in url, f"unexpected weather.gov call: {url}"
-        return _stub_response(geo if "geocoding" in url else openmeteo)
+        if "geocoding" in url:
+            return _stub_response(geo)
+        if "api.met.no" in url:
+            return _stub_response(_METNO_PAYLOAD)
+        return _stub_response(openmeteo)
 
     monkeypatch.setattr(weather.httpx, "get", fake_get)
 
@@ -256,3 +288,130 @@ def test_fahrenheit_to_c():
     assert round(weather._fahrenheit_to_c(32.0), 3) == 0.0
     assert round(weather._fahrenheit_to_c(212.0), 3) == 100.0
     assert round(weather._fahrenheit_to_c(90.0), 2) == 32.22
+
+
+# --------------------------------------------------------------------------- #
+# met.no — secondary worldwide source
+# --------------------------------------------------------------------------- #
+def test_get_metno_research_parses_highs_and_lows(monkeypatch):
+    """Direct unit test: per-date high = max, low = min over the timeseries."""
+    _clear_caches()
+    payload = {
+        "properties": {
+            "timeseries": [
+                {"time": "2026-06-20T00:00:00Z",
+                 "data": {"instant": {"details": {"air_temperature": 15.0}}}},
+                {"time": "2026-06-20T12:00:00Z",
+                 "data": {"instant": {"details": {"air_temperature": 18.0}}}},
+                {"time": "2026-06-20T18:00:00Z",
+                 "data": {"instant": {"details": {"air_temperature": 12.0}}}},
+                {"time": "2026-06-21T12:00:00Z",
+                 "data": {"instant": {"details": {"air_temperature": 22.5}}}},
+            ]
+        }
+    }
+
+    monkeypatch.setattr(
+        weather.httpx, "get", lambda url, *a, **k: _stub_response(payload))
+
+    out = weather._get_metno_research((51.5074, -0.1278), "2026-06-20")
+    assert out is not None
+    assert out["source"] == "met.no"
+    assert out["source_url"].startswith("https://api.met.no/")
+    by_date = {d["date"]: d for d in out["forecast_days"]}
+    # temps [15, 18, 12] on June 20 -> high 18, low 12.
+    assert by_date["2026-06-20"]["high_c"] == 18.0
+    assert by_date["2026-06-20"]["low_c"] == 12.0
+    # Target-date highs/lows are surfaced at the top level too.
+    assert out["forecast_high_c"] == 18.0
+    assert out["forecast_low_c"] == 12.0
+
+
+def test_get_metno_research_empty_returns_none(monkeypatch):
+    """An empty timeseries yields None (never raises)."""
+    _clear_caches()
+    monkeypatch.setattr(
+        weather.httpx, "get",
+        lambda url, *a, **k: _stub_response({"properties": {"timeseries": []}}))
+    assert weather._get_metno_research((1.0, 2.0), None) is None
+
+
+def test_get_metno_research_sends_user_agent(monkeypatch):
+    """met.no is fetched with a mandatory User-Agent header (else 403)."""
+    _clear_caches()
+    seen = {}
+
+    def fake_get(url, *a, **k):
+        seen["url"] = url
+        seen["headers"] = k.get("headers")
+        seen["params"] = k.get("params")
+        return _stub_response(_METNO_PAYLOAD)
+
+    monkeypatch.setattr(weather.httpx, "get", fake_get)
+    weather._get_metno_research((51.50741234, -0.12779999), "2026-06-20")
+
+    assert "api.met.no" in seen["url"]
+    assert seen["headers"] is not None
+    assert "User-Agent" in seen["headers"]
+    assert seen["headers"]["User-Agent"]
+    # Coordinates must be rounded to <=4 decimals for met.no's cache.
+    assert seen["params"]["lat"] == round(51.50741234, 4)
+    assert seen["params"]["lon"] == round(-0.12779999, 4)
+
+
+def test_non_us_city_gets_metno_field(monkeypatch):
+    """A non-US city (Tokyo) now gains a `metno` block AND keeps Open-Meteo."""
+    _clear_caches()
+    geo = json.loads((FIX / "openmeteo_geocode.json").read_text())
+    openmeteo = json.loads((FIX / "openmeteo_forecast.json").read_text())
+
+    def fake_get(url, *a, **k):
+        if "geocoding" in url:
+            return _stub_response(geo)
+        if "api.met.no" in url:
+            return _stub_response(_METNO_PAYLOAD)
+        return _stub_response(openmeteo)
+
+    monkeypatch.setattr(weather.httpx, "get", fake_get)
+
+    result = weather.fetch_weather_forecast(
+        "Will the high in Tokyo on June 20 be 24C?")
+
+    assert result["city"].lower().startswith("tokyo")
+    # Open-Meteo (primary) is intact.
+    assert result["forecast_high_c"] is not None
+    assert result["source"] == "open-meteo"
+    # Secondary worldwide met.no source is present for a non-US city.
+    assert "metno" in result
+    mn = result["metno"]
+    assert mn["source"] == "met.no"
+    assert mn["source_url"].startswith("https://api.met.no/")
+    # June 20 in the payload: high 28, low 19.
+    assert mn["forecast_high_c"] == 28.0
+    assert mn["forecast_low_c"] == 19.0
+    # No US source for Tokyo.
+    assert "weathergov" not in result
+
+
+def test_metno_error_leaves_result_working(monkeypatch):
+    """If met.no errors, the result is the plain Open-Meteo payload (no metno)."""
+    _clear_caches()
+    geo = json.loads((FIX / "openmeteo_geocode.json").read_text())
+    openmeteo = json.loads((FIX / "openmeteo_forecast.json").read_text())
+
+    def fake_get(url, *a, **k):
+        if "api.met.no" in url:
+            raise RuntimeError("met.no down")
+        if "geocoding" in url:
+            return _stub_response(geo)
+        return _stub_response(openmeteo)
+
+    monkeypatch.setattr(weather.httpx, "get", fake_get)
+
+    result = weather.fetch_weather_forecast(
+        "Will the high in Tokyo on June 20 be 24C?")
+
+    # Open-Meteo still produced a forecast; no metno field on error.
+    assert result["forecast_high_c"] is not None
+    assert result["source"] == "open-meteo"
+    assert "metno" not in result

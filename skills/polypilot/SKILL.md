@@ -97,6 +97,15 @@ where your own data disagrees, trust your data.
    z-score / imbalance) to inform — never gate — the thesis. Write an explicit
    fair-probability estimate and a one-paragraph thesis. Consult the category
    playbook in `references/`.
+   - **Cross-check sources — agreement is confidence, divergence is caution.**
+     `get_crypto`, `get_sports`, and `get_weather_forecast` each return MULTIPLE
+     sources at once (CoinGecko+Binance; ESPN+TheSportsDB; Open-Meteo+MET Norway
+     +weather.gov). When the sources AGREE — small `spot_divergence_pct`,
+     `sources_agree: true`, two weather models within ~1°C — trust the read and
+     you may size normally. When they DIVERGE — a large price gap, conflicting
+     scores/states, or models far apart — treat the data as unreliable: widen
+     your uncertainty, size down, or skip. A single source disagreeing with the
+     others is a red flag, not a tiebreaker to cherry-pick.
    - **Structured tools first, web fallback second — cover as many markets as
      possible.** Prefer the structured polypilot research tools whenever they fit
      the market (`get_weather_forecast`, `get_crypto`, `get_sports`,

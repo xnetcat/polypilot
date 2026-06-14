@@ -199,28 +199,50 @@ def _crypto_payload(price: float) -> dict:
     }}
 
 
+def _binance_ticker(price: float) -> dict:
+    return {"lastPrice": str(price), "priceChangePercent": "0.5", "quoteVolume": "1.0"}
+
+
+def _crypto_counting_get(cg_price_for_hit):
+    """Fake httpx.get for the MULTI-SOURCE crypto path. Crypto now fetches
+    CoinGecko AND Binance concurrently, so a raw total-call counter is racy /
+    inflated. Route by URL and count CoinGecko ``/simple/price`` hits
+    specifically — that's the cache signal — while serving a valid Binance
+    ticker so the Binance source resolves deterministically in one call.
+    ``cg_price_for_hit(n)`` -> CoinGecko spot for the n-th CoinGecko hit."""
+    state = {"cg": 0}
+
+    def fake_get(url, *args, **kwargs):
+        if "/simple/price" in url:
+            state["cg"] += 1
+            return _Resp(_crypto_payload(cg_price_for_hit(state["cg"])))
+        if "binance" in url or "ticker/24hr" in url:
+            return _Resp(_binance_ticker(64000.0))
+        return _Resp({})   # market_chart / search / other -> nothing usable
+
+    fake_get.state = state
+    return fake_get
+
+
 def test_crypto_cache_hit_within_ttl(monkeypatch):
     crypto._CACHE.clear()
-    fake = _counting_get(lambda n, url: _crypto_payload(60000.0))
+    fake = _crypto_counting_get(lambda n: 60000.0)
     monkeypatch.setattr(crypto.httpx, "get", fake)
     monkeypatch.setattr(crypto, "CACHE_TTL_SECONDS", 600.0)
 
     q = "Will Bitcoin go up or down today?"
     first = crypto.fetch_crypto(q)
     assert first["spot_usd"] == 60000.0
-    calls_after_first = fake.state["calls"]
-    assert calls_after_first == 1
+    assert fake.state["cg"] == 1
 
     second = crypto.fetch_crypto(q)
-    assert fake.state["calls"] == 1  # no re-fetch within TTL
+    assert fake.state["cg"] == 1  # no re-fetch within TTL
     assert second["spot_usd"] == 60000.0
 
 
 def test_crypto_cache_refetches_after_expiry_zero_ttl(monkeypatch):
     crypto._CACHE.clear()
-    fake = _counting_get(
-        lambda n, url: _crypto_payload(60000.0 if n <= 1 else 65000.0)
-    )
+    fake = _crypto_counting_get(lambda n: 60000.0 if n <= 1 else 65000.0)
     monkeypatch.setattr(crypto.httpx, "get", fake)
     monkeypatch.setattr(crypto, "CACHE_TTL_SECONDS", 0.0)
 
@@ -229,7 +251,7 @@ def test_crypto_cache_refetches_after_expiry_zero_ttl(monkeypatch):
     assert first["spot_usd"] == 60000.0
 
     second = crypto.fetch_crypto(q)
-    assert fake.state["calls"] == 2  # re-fetched on expiry
+    assert fake.state["cg"] == 2  # CoinGecko hit again on expiry
     assert second["spot_usd"] == 65000.0  # fresh price served
 
 
@@ -237,9 +259,7 @@ def test_crypto_cache_refetches_after_clock_advance(monkeypatch):
     crypto._CACHE.clear()
     clock = {"t": 0.0}
     monkeypatch.setattr(_cache, "_now", lambda: clock["t"])
-    fake = _counting_get(
-        lambda n, url: _crypto_payload(60000.0 if n <= 1 else 70000.0)
-    )
+    fake = _crypto_counting_get(lambda n: 60000.0 if n <= 1 else 70000.0)
     monkeypatch.setattr(crypto.httpx, "get", fake)
     monkeypatch.setattr(crypto, "CACHE_TTL_SECONDS", 600.0)
 
@@ -248,11 +268,11 @@ def test_crypto_cache_refetches_after_clock_advance(monkeypatch):
 
     clock["t"] = 300.0  # within TTL
     assert crypto.fetch_crypto(q)["spot_usd"] == 60000.0
-    assert fake.state["calls"] == 1
+    assert fake.state["cg"] == 1
 
     clock["t"] = 1200.0  # past TTL
     assert crypto.fetch_crypto(q)["spot_usd"] == 70000.0
-    assert fake.state["calls"] == 2
+    assert fake.state["cg"] == 2
 
 
 # --------------------------------------------------------------------------- #

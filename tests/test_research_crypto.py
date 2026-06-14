@@ -106,14 +106,26 @@ def test_fetch_crypto_no_asset_returns_error(monkeypatch):
 
 # --- dynamic coin coverage (any listed coin, not just the alias subset) -----
 
-def _route_get(search_coins, price_payload):
-    """A fake httpx.get routing /search vs /simple/price by URL."""
+def _is_binance(url: str) -> bool:
+    """True if ``url`` targets a Binance host/endpoint (vs CoinGecko)."""
+    return "binance" in url or "/ticker/24hr" in url or "/klines" in url
+
+
+def _route_get(search_coins, price_payload, binance=None):
+    """A fake httpx.get routing /search, /simple/price, and Binance by URL.
+
+    Both spot sources are now fetched every call, so Binance must be routed
+    explicitly. By default Binance returns an empty payload (price 0 -> None),
+    leaving CoinGecko as the sole source; pass ``binance`` to make it resolve.
+    """
     def _get(url, *a, **k):
         class R:
             def raise_for_status(self):
                 pass
 
             def json(self):
+                if _is_binance(url):
+                    return binance if binance is not None else {}
                 if "/search" in url:
                     return {"coins": search_coins}
                 return price_payload
@@ -323,6 +335,133 @@ def test_both_providers_fail_returns_error(monkeypatch):
 
             def json(self):
                 return {}  # empty Binance payload -> price 0 -> None
+
+        if "/simple/price" in url:
+            raise RuntimeError("429 Too Many Requests")
+        return R()
+
+    monkeypatch.setattr(crypto.httpx, "get", _get)
+    result = crypto.fetch_crypto("Will Bitcoin be above $70k?")
+    assert "error" in result
+
+
+# --- cross-source confidence (both spots fetched concurrently) -------------
+
+
+def test_both_sources_present_reports_breakdown_and_divergence(monkeypatch):
+    # CoinGecko (64000) AND Binance (64100) both resolve -> the result carries a
+    # per-source breakdown plus a numeric spot_divergence_pct (~0.156%).
+    crypto._CACHE.clear()
+
+    def _get(url, *a, **k):
+        class R:
+            def __init__(self, payload):
+                self._payload = payload
+
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return self._payload
+
+        if "/simple/price" in url:
+            return R({"bitcoin": {"usd": 64000.0, "usd_24h_change": 0.2, "usd_24h_vol": 1.0}})
+        if _is_binance(url) and "/ticker/24hr" in url:
+            return R(_binance_ticker(last="64100.00", change="1.5", vol="222.0"))
+        return R({})
+
+    monkeypatch.setattr(crypto.httpx, "get", _get)
+    result = crypto.fetch_crypto("Will Bitcoin be above $70k?")
+
+    # Top-level spot prefers CoinGecko.
+    assert result["source"] == "coingecko"
+    assert result["spot_usd"] == 64000.0
+
+    sources = result["sources"]
+    assert sources["coingecko"]["spot_usd"] == 64000.0
+    assert sources["binance"]["spot_usd"] == 64100.0
+    assert sources["binance"]["change_24h"] == 1.5
+    assert sources["binance"]["volume_24h"] == 222.0
+
+    # |64000-64100| / 64050 * 100 == 0.1561...
+    expected = round(abs(64000.0 - 64100.0) / ((64000.0 + 64100.0) / 2) * 100, 3)
+    assert result["spot_divergence_pct"] == expected
+    assert abs(result["spot_divergence_pct"] - 0.156) < 1e-3
+
+
+def test_coingecko_fails_binance_present_marks_source_error(monkeypatch):
+    # CoinGecko raises but Binance resolves -> top-level source/spot from Binance,
+    # and sources.coingecko records the unavailability.
+    crypto._CACHE.clear()
+
+    def _get(url, *a, **k):
+        class R:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return _binance_ticker(last="64100.00")
+
+        if "/simple/price" in url:
+            raise RuntimeError("429 Too Many Requests")
+        if _is_binance(url) and "/ticker/24hr" in url:
+            return R()
+        return R()
+
+    monkeypatch.setattr(crypto.httpx, "get", _get)
+    result = crypto.fetch_crypto("Will Bitcoin be above $70k?")
+
+    assert result["source"] == "binance"
+    assert result["spot_usd"] == 64100.0
+    assert result["sources"]["coingecko"] == {"error": "unavailable"}
+    assert result["sources"]["binance"]["spot_usd"] == 64100.0
+    # Only one source -> no divergence.
+    assert result["spot_divergence_pct"] is None
+
+
+def test_divergence_none_when_only_coingecko_present(monkeypatch):
+    # CoinGecko resolves, Binance unavailable -> divergence is None and the
+    # binance breakdown records the error.
+    crypto._CACHE.clear()
+
+    def _get(url, *a, **k):
+        class R:
+            def __init__(self, payload):
+                self._payload = payload
+
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return self._payload
+
+        if "/simple/price" in url:
+            return R({"bitcoin": {"usd": 64000.0, "usd_24h_change": 0.2, "usd_24h_vol": 1.0}})
+        if _is_binance(url):
+            return R({})  # empty -> price 0 -> None
+        return R({})
+
+    monkeypatch.setattr(crypto.httpx, "get", _get)
+    result = crypto.fetch_crypto("Will Bitcoin be above $70k?")
+
+    assert result["source"] == "coingecko"
+    assert result["spot_usd"] == 64000.0
+    assert result["sources"]["coingecko"]["spot_usd"] == 64000.0
+    assert result["sources"]["binance"] == {"error": "unavailable"}
+    assert result["spot_divergence_pct"] is None
+
+
+def test_both_sources_fail_returns_error(monkeypatch):
+    # CoinGecko raises AND Binance empty -> graceful error (unchanged behaviour).
+    crypto._CACHE.clear()
+
+    def _get(url, *a, **k):
+        class R:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {}
 
         if "/simple/price" in url:
             raise RuntimeError("429 Too Many Requests")

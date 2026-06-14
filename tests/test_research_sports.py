@@ -101,18 +101,24 @@ def test_keyword_narrows_probe_to_one_league(monkeypatch):
 
     def fake_get(url, *a, **k):
         calls.append(url)
+        # TheSportsDB runs concurrently now; give it no event so ESPN stays
+        # the top-level source.
+        body = ({"event": []} if "thesportsdb.com" in url
+                else _scoreboard("Lakers at Celtics", "LAL @ BOS",
+                                 teams=("Celtics", "Lakers")))
 
         class R:
             def raise_for_status(self): pass
-            def json(self): return _scoreboard("Lakers at Celtics", "LAL @ BOS",
-                                               teams=("Celtics", "Lakers"))
+            def json(self): return body
         return R()
 
     monkeypatch.setattr(sports.httpx, "get", fake_get)
     out = sports.fetch_sports("Will the Lakers beat the Celtics in the NBA?")
     assert out["sport"] == "basketball/nba"
-    # Only the NBA scoreboard slug was queried (keyword fast-path, no full probe).
-    assert all("basketball/nba" in u for u in calls)
+    # Only the NBA scoreboard slug was queried among ESPN (keyword fast-path, no
+    # full probe); TheSportsDB also runs but isn't an ESPN scoreboard.
+    espn_calls = [u for u in calls if "site.api.espn.com" in u]
+    assert espn_calls and all("basketball/nba" in u for u in espn_calls)
 
 
 def test_fetch_sports_matches_real_fixture(monkeypatch):
@@ -169,21 +175,99 @@ def test_thesportsdb_fallback_when_espn_empty(monkeypatch):
 
 def test_espn_preferred_over_thesportsdb(monkeypatch):
     _clear()
+    # BOTH sources now run on every call; ESPN should be the TOP-LEVEL source
+    # while TheSportsDB is also populated under out["sources"].
+    tsdb = _tsdb_event("Arsenal", "Chelsea", 1, 1, "1H")
 
     def fake_get(url, *a, **k):
         if "thesportsdb.com" in url:
-            raise AssertionError("TheSportsDB must not be queried when ESPN matched")
-        body = _scoreboard("Arsenal vs Chelsea", "ARS v CHE", state="in",
-                           scores=(1, 1), teams=("Arsenal", "Chelsea"))
+            body = tsdb
+        elif "soccer/eng.1" in url:
+            body = _scoreboard("Arsenal vs Chelsea", "ARS v CHE", state="in",
+                               scores=(1, 1), teams=("Arsenal", "Chelsea"))
+        else:
+            body = {"events": []}
 
         class R:
             def raise_for_status(self): pass
-            def json(self): return body if "soccer/eng.1" in url else {"events": []}
+            def json(self): return body
         return R()
 
     monkeypatch.setattr(sports.httpx, "get", fake_get)
     out = sports.fetch_sports("Arsenal vs Chelsea")
+    assert out["source"] == "espn"                       # ESPN is top-level
+    assert out["sources"]["espn"] is not None            # ESPN resolved
+    assert out["sources"]["thesportsdb"] is not None      # TheSportsDB ALSO ran
+
+
+# --- cross-source confidence: both sources queried every call -------------
+
+def _mock_espn_and_tsdb(monkeypatch, espn_slug, espn_payload, tsdb_payload):
+    """Route ESPN scoreboard calls to ``espn_payload`` (under ``espn_slug``) and
+    TheSportsDB calls to ``tsdb_payload``; any other ESPN slug returns empty."""
+    def fake_get(url, *a, **k):
+        if "thesportsdb.com" in url:
+            body = tsdb_payload
+        elif espn_slug and espn_slug in url:
+            body = espn_payload
+        else:
+            body = {"events": []}
+
+        class R:
+            def raise_for_status(self): pass
+            def json(self): return body
+        return R()
+
+    monkeypatch.setattr(sports.httpx, "get", fake_get)
+
+
+def test_both_sources_resolve_and_agree(monkeypatch):
+    _clear()
+    # Both report a FINAL game with the same combined score (2 + 1 = 3).
+    _mock_espn_and_tsdb(
+        monkeypatch, "soccer/eng.1",
+        _scoreboard("Arsenal vs Chelsea", "ARS v CHE", state="post",
+                    scores=(2, 1), teams=("Arsenal", "Chelsea")),
+        _tsdb_event("Arsenal", "Chelsea", 2, 1, "FT"),
+    )
+    out = sports.fetch_sports("Will Arsenal beat Chelsea?")
     assert out["source"] == "espn"
+    assert out["sources"]["espn"] is not None
+    assert out["sources"]["thesportsdb"] is not None
+    assert out["agreement"] == {"state": True, "combined_score": True}
+    assert out["sources_agree"] is True
+
+
+def test_both_sources_resolve_but_disagree_on_state(monkeypatch):
+    _clear()
+    # ESPN says the game is LIVE ('in'); TheSportsDB says it's FINAL ('post').
+    _mock_espn_and_tsdb(
+        monkeypatch, "soccer/eng.1",
+        _scoreboard("Arsenal vs Chelsea", "ARS v CHE", state="in",
+                    scores=(2, 1), teams=("Arsenal", "Chelsea")),
+        _tsdb_event("Arsenal", "Chelsea", 2, 1, "FT"),
+    )
+    out = sports.fetch_sports("Will Arsenal beat Chelsea?")
+    assert out["sources"]["espn"] is not None
+    assert out["sources"]["thesportsdb"] is not None
+    assert out["agreement"]["state"] is False
+    assert out["sources_agree"] is False
+
+
+def test_only_thesportsdb_resolves(monkeypatch):
+    _clear()
+    # ESPN finds nothing; only TheSportsDB has the game.
+    _mock_espn_and_tsdb(
+        monkeypatch, None, {"events": []},
+        _tsdb_event("Arsenal", "Chelsea", 2, 1, "FT"),
+    )
+    out = sports.fetch_sports("Will Arsenal beat Chelsea?")
+    assert out["source"] == "thesportsdb"
+    assert out["sources"]["espn"] is None
+    assert out["sources"]["thesportsdb"] is not None
+    # Fewer than two sources resolved -> no agreement summary.
+    assert out["agreement"] is None
+    assert out["sources_agree"] is None
 
 
 def test_tsdb_state_mapping():
