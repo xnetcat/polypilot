@@ -6,6 +6,24 @@ import polymarket_mcp.research.sports as sports
 FIX = Path(__file__).parent / "fixtures"
 
 
+def test_detect_sport_mlb_and_nfl_by_team():
+    # MLB and NFL teams must resolve to their ESPN leagues (previously null,
+    # which silently disabled live-score lookups for those games).
+    assert sports._detect_sport("Tampa Bay Rays vs. Los Angeles Angels: O/U 5.5") == "baseball/mlb"
+    assert sports._detect_sport("Will the Dodgers beat the Mets?") == "baseball/mlb"
+    assert sports._detect_sport("Will the Chiefs beat the Eagles?") == "football/nfl"
+
+
+def test_detect_sport_nba_nhl_still_work():
+    assert sports._detect_sport("Will the Lakers win tonight?") == "basketball/nba"
+    assert sports._detect_sport("Bruins vs Rangers") == "hockey/nhl"
+
+
+def test_detect_sport_explicit_league_keyword_wins():
+    assert sports._detect_sport("MLB: who wins the World Series?") == "baseball/mlb"
+    assert sports._detect_sport("Premier League title winner") == "soccer/eng.1"
+
+
 def test_fetch_sports_parses_event(monkeypatch):
     sports._CACHE.clear()
     data = json.loads((FIX / "espn_scoreboard.json").read_text())

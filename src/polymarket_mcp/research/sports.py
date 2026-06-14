@@ -67,10 +67,28 @@ def _detect_sport(question: str) -> str | None:
                  "penguins", "capitals", "senators", "flames", "canucks", "predators",
                  "golden knights", "blues", "kraken", "flyers", "red wings", "blackhawks",
                  "sabres", "coyotes", "sharks", "ducks", "canadiens", "blue jackets"]
+    # MLB / NFL nicknames. Names that collide across sports — "giants" and
+    # "cardinals" (MLB vs NFL), "rangers"/"jets"/"panthers" (vs NHL) — are
+    # deliberately OMITTED so they don't mis-route; rely on an explicit league
+    # keyword for those. Covers the common, unambiguous teams.
+    mlb_teams = ["rays", "angels", "yankees", "red sox", "blue jays", "orioles",
+                 "astros", "athletics", "mariners", "twins", "white sox",
+                 "guardians", "royals", "tigers", "dodgers", "padres",
+                 "diamondbacks", "dbacks", "rockies", "brewers", "reds", "cubs",
+                 "pirates", "phillies", "mets", "braves", "nationals", "marlins"]
+    nfl_teams = ["chiefs", "eagles", "49ers", "niners", "cowboys", "bills",
+                 "dolphins", "patriots", "ravens", "bengals", "browns",
+                 "steelers", "colts", "jaguars", "titans", "broncos", "chargers",
+                 "raiders", "packers", "vikings", "lions", "buccaneers", "saints",
+                 "falcons", "seahawks", "commanders", "texans", "bears"]
     if any(t in q for t in nba_teams):
         return "basketball/nba"
     if any(t in q for t in nhl_teams):
         return "hockey/nhl"
+    if any(t in q for t in mlb_teams):
+        return "baseball/mlb"
+    if any(t in q for t in nfl_teams):
+        return "football/nfl"
     # Soccer — map teams to their actual league
     _soccer_league_map = {
         "arsenal": "soccer/eng.1", "liverpool": "soccer/eng.1", "man city": "soccer/eng.1",
