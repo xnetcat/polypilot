@@ -97,6 +97,38 @@ def test_parse_market_economics_defaults_when_missing():
         "fee_rate": 0.0, "fee_exponent": 1.0, "fees_enabled": False}
 
 
+def test_fetch_markets_closing_within_queries_end_date_window(monkeypatch):
+    # The closing-window fetch must hit Gamma with an end_date_min/end_date_max
+    # window ordered by endDate — that's how short-dated (e.g. 5-min crypto)
+    # markets are surfaced past the volume sort.
+    captured = {}
+    row = dict(GAMMA_ROW, question="Bitcoin Up or Down - 10:00-10:05 ET",
+               conditionId="0xbtc5m")
+
+    class FakeResp:
+        def raise_for_status(self): pass
+        def json(self): return [row]
+
+    def fake_get(url, *a, **k):
+        captured["params"] = k.get("params", {})
+        return FakeResp()
+
+    monkeypatch.setattr(markets.httpx, "get", fake_get)
+    out = markets.fetch_markets_closing_within(2, limit=150)
+    p = captured["params"]
+    assert "end_date_min" in p and "end_date_max" in p
+    assert p["order"] == "endDate" and p["ascending"] is True
+    assert len(out) == 1
+    assert out[0].question.startswith("Bitcoin Up or Down")
+
+
+def test_fetch_markets_closing_within_returns_empty_on_error(monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("gamma down")
+    monkeypatch.setattr(markets.httpx, "get", boom)
+    assert markets.fetch_markets_closing_within(1) == []
+
+
 def test_economics_flow_into_market_dict(monkeypatch):
     row = dict(GAMMA_ROW, orderMinSize=5, orderPriceMinTickSize="0.01",
                feesEnabled=True, feeSchedule={"rate": 0.04, "exponent": 1})

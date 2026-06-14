@@ -207,7 +207,7 @@ timing — is the agent's judgment, not hardcoded.
 Grouped by purpose. The agent calls what it needs; all tools return plain JSON.
 
 **Markets**
-- `list_markets` — discover active markets (filter by category, min volume, keyword, `binary_only`, or `closing_within_hours` to target soon-resolving markets), sorted by volume; auto-fetches a larger pool when filtering so niche/soon-closing markets aren't hidden behind the volume sort. Each dict includes `hours_to_close`, `min_order_size`, `tick_size`, and the market's `fee_rate`/`fee_exponent`/`fees_enabled`.
+- `list_markets` — discover active markets (filter by category, min volume, keyword, or `binary_only`), sorted by volume; auto-fetches a larger pool when filtering. Set **`closing_within_hours`** to switch to an end-date-window query that surfaces low-volume **short-dated** markets the volume sort hides — e.g. the 5-minute crypto "Up or Down" candles. Each dict includes `hours_to_close`, `min_order_size`, `tick_size`, and the market's `fee_rate`/`fee_exponent`/`fees_enabled`.
 - `get_market` — full detail for one market by condition id.
 - `get_order_book` — live order book summary for a CLOB token (best bid/ask, spread, midpoint, imbalance, top levels).
 - `get_price_history` — price-history summary for a token over an interval (first/last/high/low/change).

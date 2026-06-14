@@ -80,14 +80,20 @@ def list_markets(limit: int = 50, category: str | None = None,
     return only YES/NO markets. Set `closing_within_hours` (e.g. 24) to keep only
     markets resolving within that many hours — useful for targeting soon-settling
     markets for faster capital turnover. Returns a list of market dicts."""
-    # When any filter is active, fetch a LARGER pool before filtering: the Gamma
-    # feed is volume-sorted, so soon-closing / niche-category / lower-volume
-    # markets (exactly what weather/crypto-threshold trading wants) rarely make
-    # the top-50 and would otherwise be filtered out of a tiny window.
-    filtering = bool(category or keyword or min_volume > 0 or binary_only
-                     or closing_within_hours is not None)
-    fetch_n = max(max(limit, 50), 400 if filtering else 0)
-    found = _markets.fetch_active_markets(limit=fetch_n)
+    # Discovery source depends on intent:
+    #  - closing_within_hours set: query Gamma by END-DATE WINDOW. The default
+    #    feed is volume-sorted, so low-volume short-dated markets (e.g. 5-minute
+    #    crypto "Up or Down" candles) never make the top page; the window query
+    #    is the only way to surface them.
+    #  - otherwise: the volume-sorted page, fetching a larger pool when filtering
+    #    so niche categories aren't squeezed out of a tiny window.
+    if closing_within_hours is not None:
+        found = _markets.fetch_markets_closing_within(
+            closing_within_hours, limit=max(limit * 3, 200))
+    else:
+        filtering = bool(category or keyword or min_volume > 0 or binary_only)
+        fetch_n = max(max(limit, 50), 400 if filtering else 0)
+        found = _markets.fetch_active_markets(limit=fetch_n)
     out = []
     for m in found:
         if binary_only and not m.is_binary:

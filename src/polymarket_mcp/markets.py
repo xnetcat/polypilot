@@ -119,10 +119,69 @@ class Market:
         }
 
 
-def fetch_active_markets(limit: int = 50) -> list[Market]:
-    """Fetch active, liquid markets from Polymarket's Gamma API."""
-    markets = []
+def _market_from_gamma_row(m: dict) -> Market | None:
+    """Parse one raw Gamma market row into a Market for LIST views, applying
+    liquidity/quality pruning (skip zero-volume, resolved-extreme binary, or
+    token-less rows). Returns None to skip the row; never raises. Shared by the
+    volume-sorted and closing-window fetches so both prune identically."""
+    try:
+        # Gamma API uses outcomePrices as a JSON string.
+        outcome_prices = m.get("outcomePrices", "")
+        yes_price = 0.5
+        no_price = 0.5
+        prices: list = []  # always bound, even if outcomePrices is malformed JSON
+        if outcome_prices:
+            try:
+                prices = json.loads(outcome_prices) if isinstance(outcome_prices, str) else outcome_prices
+                if len(prices) >= 2:
+                    yes_price = float(prices[0])
+                    no_price = float(prices[1])
+            except (json.JSONDecodeError, TypeError, ValueError):
+                pass
 
+        token_list = _normalize_tokens(
+            raw_tokens=m.get("tokens", []),
+            raw_outcomes=m.get("outcomes", []),
+            raw_clob_token_ids=m.get("clobTokenIds", []),
+            raw_prices=prices if outcome_prices else [],
+            yes_price=yes_price,
+            no_price=no_price,
+        )
+
+        vol = float(m.get("volume", m.get("volumeNum", 0)) or 0)
+        question = (m.get("question") or "").strip()
+        condition_id = m.get("conditionId", m.get("condition_id", m.get("id", "")))
+        is_binary = _has_binary_tokens(token_list)
+
+        # Skip low-info / illiquid / resolved markets. The price-extreme prune
+        # (yes_price 0.0/1.0) only makes sense for binary markets: a multi-outcome
+        # token at 0.0/1.0 is a normal long-shot/lock and must not drop the row.
+        if vol == 0 or not question or not condition_id:
+            return None
+        if is_binary and yes_price in (0.0, 1.0):
+            return None
+        if not _has_usable_tokens(token_list):
+            return None
+
+        return Market(
+            condition_id=condition_id,
+            question=question,
+            category=_infer_category(question, m.get("tags", None) or []),
+            yes_price=yes_price,
+            no_price=no_price,
+            volume=vol,
+            end_date=m.get("endDate", m.get("end_date_iso", "")),
+            active=m.get("active", True),
+            tokens=token_list,
+            is_binary=is_binary,
+            **_parse_market_economics(m),
+        )
+    except (KeyError, ValueError, TypeError):
+        return None
+
+
+def fetch_active_markets(limit: int = 50) -> list[Market]:
+    """Fetch active, liquid markets from Polymarket's Gamma API (volume-sorted)."""
     try:
         resp = httpx.get(
             f"{config.GAMMA_API}/markets",
@@ -142,68 +201,46 @@ def fetch_active_markets(limit: int = 50) -> list[Market]:
         return _fetch_from_clob(limit)
 
     items = data if isinstance(data, list) else data.get("data", [])
-
-    for m in items:
-        try:
-            # Gamma API uses outcomePrices as a JSON string
-            outcome_prices = m.get("outcomePrices", "")
-            yes_price = 0.5
-            no_price = 0.5
-            prices: list = []  # always bound, even if outcomePrices is malformed JSON
-
-            if outcome_prices:
-                try:
-                    prices = json.loads(outcome_prices) if isinstance(outcome_prices, str) else outcome_prices
-                    if len(prices) >= 2:
-                        yes_price = float(prices[0])
-                        no_price = float(prices[1])
-                except (json.JSONDecodeError, TypeError, ValueError):
-                    pass
-
-            token_list = _normalize_tokens(
-                raw_tokens=m.get("tokens", []),
-                raw_outcomes=m.get("outcomes", []),
-                raw_clob_token_ids=m.get("clobTokenIds", []),
-                raw_prices=prices if outcome_prices else [],
-                yes_price=yes_price,
-                no_price=no_price,
-            )
-
-            vol = float(m.get("volume", m.get("volumeNum", 0)) or 0)
-            question = (m.get("question") or "").strip()
-            condition_id = m.get("conditionId", m.get("condition_id", m.get("id", "")))
-            is_binary = _has_binary_tokens(token_list)
-
-            # Skip low-info / illiquid / resolved markets.
-            # The price-extreme prune (yes_price at 0.0/1.0) only makes sense for
-            # binary markets: a multi-outcome token sitting at 0.0/1.0 is a normal
-            # long-shot/lock candidate and must not drop the whole market.
-            if vol == 0 or not question or not condition_id:
-                continue
-            if is_binary and yes_price in (0.0, 1.0):
-                continue
-            if not _has_usable_tokens(token_list):
-                continue
-
-            markets.append(Market(
-                condition_id=condition_id,
-                question=question,
-                category=_infer_category(question, m.get("tags", None) or []),
-                yes_price=yes_price,
-                no_price=no_price,
-                volume=vol,
-                end_date=m.get("endDate", m.get("end_date_iso", "")),
-                active=m.get("active", True),
-                tokens=token_list,
-                is_binary=is_binary,
-                **_parse_market_economics(m),
-            ))
-        except (KeyError, ValueError, TypeError):
-            continue
-
-    # Sort by volume descending
+    markets = [mk for mk in (_market_from_gamma_row(m) for m in items) if mk is not None]
     markets.sort(key=lambda x: x.volume, reverse=True)
     return markets
+
+
+def fetch_markets_closing_within(hours: float, limit: int = 150) -> list[Market]:
+    """Active markets CLOSING within ``hours`` from now, via Gamma's end-date
+    window (``end_date_min``=now .. ``end_date_max``=now+hours, soonest-first).
+
+    The default volume-sorted page never reaches low-volume short-dated markets —
+    e.g. the **5-minute crypto 'Up or Down' candles** — so this dedicated window
+    query is how the agent discovers them. ``end_date_min``=now excludes stale
+    already-past rows. Sorted soonest-closing first; never raises."""
+    now = datetime.datetime.now(datetime.timezone.utc)
+    lo = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    hi = (now + datetime.timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        resp = httpx.get(
+            f"{config.GAMMA_API}/markets",
+            params={
+                "limit": limit,
+                "active": True,
+                "closed": False,
+                "end_date_min": lo,
+                "end_date_max": hi,
+                "order": "endDate",
+                "ascending": True,
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        log.warning("[markets] Gamma closing-window error: %s", e)
+        return []
+
+    items = data if isinstance(data, list) else data.get("data", [])
+    out = [mk for mk in (_market_from_gamma_row(m) for m in items) if mk is not None]
+    out.sort(key=lambda x: (x.hours_to_close if x.hours_to_close is not None else 1e9))
+    return out
 
 
 def fetch_market(condition_id: str) -> Market | None:

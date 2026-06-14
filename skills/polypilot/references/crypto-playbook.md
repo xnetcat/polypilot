@@ -28,6 +28,13 @@ adjust if your data disagrees.
   default here is to **skip**; only trade with a genuinely strong, well-grounded
   signal (clear momentum or a confident model prediction), and even then size
   **tiny**. Pure odd/even or coin-flip-style framings are traps — skip them.
+  - **Finding them:** they're low-volume, so the default volume-sorted
+    `list_markets` won't show them — use `list_markets(category="crypto",
+    closing_within_hours=1)` (an end-date-window query) to surface the live
+    candles. These markets also carry a **higher fee** (rate ~0.07 vs ~0.03–0.05
+    elsewhere), which near 0.5 is ~1.7% — pass the market's real `fee_rate` to
+    `compute_edge`. Use a **market order** (the tiny size won't meet the 5-share
+    limit floor) and remember the kill-switch is your whole bankroll.
 
 ## Using the inputs together
 - Don't over-trust the Chronos prediction; treat it as one input alongside spot,

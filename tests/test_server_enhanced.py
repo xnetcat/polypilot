@@ -448,16 +448,25 @@ def test_list_markets_closing_within_hours_filter(srv, monkeypatch):
         condition_id="far", question="Resolves later?", category="crypto",
         yes_price=0.5, no_price=0.5, volume=9000.0, end_date=_iso(72),
         active=True, tokens=[{"token_id": "t", "outcome": "Yes", "price": 0.5}])
+    # Default path uses the volume page; the closing window uses its own fetch.
     monkeypatch.setattr(srv._markets, "fetch_active_markets",
                         lambda *a, **k: [far, soon])
+    captured = {}
 
-    # No filter -> both; each dict carries hours_to_close.
+    def fake_window(hours, limit=150):
+        captured["hours"] = hours
+        return [soon]   # the window query already bounds + sorts by close time
+
+    monkeypatch.setattr(srv._markets, "fetch_markets_closing_within", fake_window)
+
+    # No filter -> volume page, both; each dict carries hours_to_close.
     all_out = srv.list_markets()
     assert {m["market_id"] for m in all_out["markets"]} == {"soon", "far"}
     assert all(m["hours_to_close"] is not None for m in all_out["markets"])
 
-    # closing_within_hours=24 -> only the market resolving in ~6h.
+    # closing_within_hours -> routes to the window fetch, returns only the soon one.
     near = srv.list_markets(closing_within_hours=24)
+    assert captured["hours"] == 24
     assert near["count"] == 1
     assert near["markets"][0]["market_id"] == "soon"
 
