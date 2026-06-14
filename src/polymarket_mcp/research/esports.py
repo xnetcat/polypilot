@@ -96,16 +96,49 @@ def _normalize_team_name(name: str, *, strip_article: bool = True) -> str:
     return cleaned
 
 
+# Distinct game keywords, longest-first, for peeling a trailing game name off an
+# extracted team ("G2 in CS2" -> "G2", "Gen.G LoL" -> "Gen.G"). Connector words
+# ("in"/"on"/...) left dangling before the game word are peeled too.
+_GAME_SUFFIX_PHRASES = sorted({kw for kw, _ in _GAME_KEYWORDS}, key=len, reverse=True)
+_TEAM_CONNECTOR_NOISE = {"in", "on", "at", "this", "the", "for"}
+
+
+def _strip_game_suffix(name: str) -> str:
+    """Peel a trailing game name (and any connector before it) off an extracted
+    team name. Only strips when a real token precedes the game word, so a bare
+    game name (or a team whose name merely contains a game word mid-string) is
+    left intact."""
+    cleaned = name.strip()
+    while cleaned:
+        low = cleaned.lower()
+        stripped = False
+        for phrase in _GAME_SUFFIX_PHRASES:
+            if low.endswith(" " + phrase):
+                cleaned = cleaned[: len(cleaned) - len(phrase) - 1]
+                cleaned = cleaned.strip().strip(".,!?;:-–").strip()
+                stripped = True
+                break
+        if not stripped:
+            tokens = cleaned.split()
+            if len(tokens) >= 2 and tokens[-1].lower() in _TEAM_CONNECTOR_NOISE:
+                cleaned = " ".join(tokens[:-1]).strip()
+                stripped = True
+        if not stripped:
+            break
+    return cleaned
+
+
 def _extract_teams(question: str) -> tuple[str, str] | None:
     """Extract two team names from an esports question.
 
     Handles "A vs B" / "A vs. B" and "Will A beat/defeat B" phrasings, mirroring
-    the simple parser in ``research/sports.py``. Returns ``(team1, team2)`` with
-    ``team2`` possibly empty for "Will A win" phrasings, or None when no team
-    pair can be parsed.
+    the simple parser in ``research/sports.py``. Trailing game qualifiers
+    ("... vs G2 in CS2", "T1 vs Gen.G LoL") are peeled off so the names match
+    PandaScore / TheSportsDB. Returns ``(team1, team2)`` with ``team2`` possibly
+    empty for "Will A win" phrasings, or None when no team pair can be parsed.
     """
     def _norm(value: str) -> str:
-        return _normalize_team_name(value, strip_article=True)
+        return _strip_game_suffix(_normalize_team_name(value, strip_article=True))
 
     vs_match = re.search(r"(.+?)\s+vs\.?\s+(.+?)(?::|$|\?)", question)
     if vs_match:

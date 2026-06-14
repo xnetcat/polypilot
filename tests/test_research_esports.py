@@ -42,7 +42,8 @@ def test_non_esports_question_returns_no_game():
 # --- Team extraction ------------------------------------------------------
 
 def test_extract_teams_vs():
-    assert esports._extract_teams("NAVI vs G2 in CS2") == ("NAVI", "G2 in CS2")
+    # Trailing game qualifiers are peeled so the names match the data sources.
+    assert esports._extract_teams("NAVI vs G2 in CS2") == ("NAVI", "G2")
 
 
 def test_extract_teams_beat():
@@ -53,6 +54,24 @@ def test_extract_teams_beat():
 
 def test_extract_teams_none():
     assert esports._extract_teams("Who wins the tournament") is None
+
+
+def test_extract_teams_strips_trailing_game_suffix():
+    # Various trailing-game forms all reduce to the bare team names.
+    assert esports._extract_teams("T1 vs Gen.G LoL") == ("T1", "Gen.G")
+    assert esports._extract_teams("NAVI vs G2 CS2") == ("NAVI", "G2")
+    assert esports._extract_teams("OG vs Liquid Dota 2") == ("OG", "Liquid")
+    assert esports._extract_teams(
+        "Sentinels vs Fnatic Valorant") == ("Sentinels", "Fnatic")
+    assert esports._extract_teams(
+        "Spirit vs Tundra league of legends") == ("Spirit", "Tundra")
+
+
+def test_strip_game_suffix_leaves_clean_and_bare_names():
+    # A clean team name is untouched; a bare game word is NOT stripped to empty.
+    assert esports._strip_game_suffix("G2 Esports") == "G2 Esports"
+    assert esports._strip_game_suffix("CS2") == "CS2"
+    assert esports._strip_game_suffix("Cloud9") == "Cloud9"
 
 
 # --- httpx routing helper -------------------------------------------------
