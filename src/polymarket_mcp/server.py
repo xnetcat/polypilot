@@ -601,11 +601,13 @@ def notify_status() -> dict:
 
 
 @mcp.tool()
-def wait_for_next_cycle(min_seconds: int = 300) -> dict:
+async def wait_for_next_cycle(min_seconds: int = 300) -> dict:
     """Pause between trading cycles. Sleeps server-side for ~min_seconds but
     returns early if a held position nears resolution so you can settle it.
-    Call this at the end of each cycle, then start the next cycle."""
-    return _pacing.wait_for_next_cycle(min_seconds=min_seconds)
+    Call this at the end of each cycle, then start the next cycle. The wait is
+    async/cancellable, so interrupting it frees the server immediately (a
+    blocking sleep would freeze every later tool call until it elapsed)."""
+    return await _pacing.wait_for_next_cycle(min_seconds=min_seconds)
 
 
 def main() -> None:

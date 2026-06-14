@@ -2,21 +2,28 @@
 """Extra breadth for the loop-pacing helper: the accumulation arithmetic of
 wait_for_next_cycle (no overshoot, immediate return at zero) and the real
 _has_near_resolution book-midpoint logic (mocking only its I/O dependencies)."""
+import asyncio
 import importlib
 
 import polymarket_mcp.pacing as pacing
+
+
+def _recorder(slept):
+    async def _s(seconds):
+        slept.append(seconds)
+    return _s
 
 
 def test_min_seconds_zero_returns_immediately(monkeypatch):
     """min_seconds=0 must not enter the loop at all: zero wait, no early exit."""
     importlib.reload(pacing)
     slept = []
-    monkeypatch.setattr(pacing.time, "sleep", lambda s: slept.append(s))
+    monkeypatch.setattr(pacing, "_async_sleep", _recorder(slept))
     # _has_near_resolution should never be consulted when there is no time to wait.
     monkeypatch.setattr(pacing, "_has_near_resolution",
                         lambda mode: (_ for _ in ()).throw(
                             AssertionError("should not poll when min_seconds=0")))
-    out = pacing.wait_for_next_cycle(min_seconds=0, mode="paper")
+    out = asyncio.run(pacing.wait_for_next_cycle(min_seconds=0, mode="paper"))
     assert out["waited_seconds"] == 0
     assert out["early_exit"] is False
     assert slept == []  # never slept
@@ -27,9 +34,10 @@ def test_non_divisible_accumulation_never_overshoots(monkeypatch):
     The final chunk is clamped to the remainder (min(poll, remaining))."""
     importlib.reload(pacing)
     slept = []
-    monkeypatch.setattr(pacing.time, "sleep", lambda s: slept.append(s))
+    monkeypatch.setattr(pacing, "_async_sleep", _recorder(slept))
     monkeypatch.setattr(pacing, "_has_near_resolution", lambda mode: False)
-    out = pacing.wait_for_next_cycle(min_seconds=100, mode="paper", poll_seconds=30)
+    out = asyncio.run(
+        pacing.wait_for_next_cycle(min_seconds=100, mode="paper", poll_seconds=30))
     assert out["waited_seconds"] == 100  # exact, never overshoots
     assert out["early_exit"] is False
     # 30 + 30 + 30 + 10 == 100; the last chunk is clamped to the remainder.
