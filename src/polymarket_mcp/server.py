@@ -80,7 +80,14 @@ def list_markets(limit: int = 50, category: str | None = None,
     return only YES/NO markets. Set `closing_within_hours` (e.g. 24) to keep only
     markets resolving within that many hours — useful for targeting soon-settling
     markets for faster capital turnover. Returns a list of market dicts."""
-    found = _markets.fetch_active_markets(limit=max(limit, 50))
+    # When any filter is active, fetch a LARGER pool before filtering: the Gamma
+    # feed is volume-sorted, so soon-closing / niche-category / lower-volume
+    # markets (exactly what weather/crypto-threshold trading wants) rarely make
+    # the top-50 and would otherwise be filtered out of a tiny window.
+    filtering = bool(category or keyword or min_volume > 0 or binary_only
+                     or closing_within_hours is not None)
+    fetch_n = max(max(limit, 50), 400 if filtering else 0)
+    found = _markets.fetch_active_markets(limit=fetch_n)
     out = []
     for m in found:
         if binary_only and not m.is_binary:
@@ -137,22 +144,71 @@ def get_market_signals(token_id: str) -> dict:
 
 
 @mcp.tool()
-def compute_edge(fair_prob: float, side: str, yes_price: float) -> dict:
+def compute_edge(fair_prob: float, side: str, yes_price: float,
+                 fee_rate: float | None = None,
+                 fee_exponent: float = 1.0) -> dict:
     """ADVISORY. Given your probability estimate (fair_prob), a side ('YES'/'NO'),
-    and the market YES price, returns expected value and ROI per $1 after ~2% fees.
-    This does not gate trades — it is a calculator for your own judgment."""
+    and the market YES price, returns expected value and ROI per $1 after the
+    Polymarket V2 platform fee. The V2 fee is PRICE-DEPENDENT —
+    `rate*(price*(1-price))**exponent` — so favorites (price near 0/1) pay almost
+    nothing and many markets charge 0. Pass the market's real `fee_rate` /
+    `fee_exponent` (on the market dict as `fee_rate`/`fee_exponent`, or 0 when
+    `fees_enabled` is false) for an exact figure; omit them to use a conservative
+    default. Returns the `fee` applied too. Not a gate — a calculator."""
+    kw = {} if fee_rate is None else {"fee_rate": fee_rate, "fee_exponent": fee_exponent}
     return {
-        "expected_value": round(_analytics.expected_value(fair_prob, side, yes_price), 4),
-        "expected_roi": round(_analytics.expected_roi(fair_prob, side, yes_price), 4),
+        "expected_value": round(_analytics.expected_value(fair_prob, side, yes_price, **kw), 4),
+        "expected_roi": round(_analytics.expected_roi(fair_prob, side, yes_price, **kw), 4),
+        "fee": round(_analytics.effective_fee(yes_price, **kw), 4),
         "fair_prob": fair_prob, "side": side.upper(), "yes_price": yes_price,
     }
 
 
 @mcp.tool()
-def suggest_size(edge: float, bankroll: float, kelly_fraction: float = 0.5) -> dict:
-    """ADVISORY half-Kelly stake suggestion. You choose whether to use it,
-    size up, or size down."""
-    return {"suggested_usd": _analytics.suggest_size(edge, bankroll, kelly_fraction)}
+def compute_edge_from_book(token_id: str, fair_prob: float,
+                           fee_rate: float | None = None,
+                           fee_exponent: float = 1.0) -> dict:
+    """ADVISORY. Edge against the REAL executable price: fetches the order book
+    for `token_id` (the token you'd BUY) and computes EV/ROI at the best ask you
+    would actually pay — not the midpoint — so you don't reason at the mid and
+    then eat the spread. `fair_prob` is your probability THAT token resolves YES.
+    Pass the market's `fee_rate`/`fee_exponent` for the exact V2 fee. Returns
+    `{best_ask, midpoint, spread, fee, expected_value, expected_roi, ...}` or an
+    `{error}` if the book has no asks. Buying a token is always a 'YES' on that
+    token, so edge = fair_prob - best_ask - fee."""
+    book = _order_book.fetch_order_book(token_id)
+    if not isinstance(book, dict) or book.get("error"):
+        return {"error": (book or {}).get("error", "order book unavailable"),
+                "token_id": token_id}
+    best_ask = book.get("best_ask")
+    if best_ask is None:
+        return {"error": "no asks on the book to buy into", "token_id": token_id}
+    kw = {} if fee_rate is None else {"fee_rate": fee_rate, "fee_exponent": fee_exponent}
+    return {
+        "token_id": token_id,
+        "best_ask": best_ask,
+        "midpoint": book.get("midpoint"),
+        "spread": book.get("spread"),
+        "fee": round(_analytics.effective_fee(best_ask, **kw), 4),
+        "expected_value": round(_analytics.expected_value(fair_prob, "YES", best_ask, **kw), 4),
+        "expected_roi": round(_analytics.expected_roi(fair_prob, "YES", best_ask, **kw), 4),
+        "fair_prob": fair_prob,
+    }
+
+
+@mcp.tool()
+def suggest_size(edge: float, bankroll: float, kelly_fraction: float = 0.5,
+                 price: float | None = None) -> dict:
+    """ADVISORY half-Kelly stake suggestion. You choose whether to use it, size
+    up, or size down. Pass `price` (the side's fill price) to also check
+    Polymarket's order minimums: a LIMIT order needs >=5 shares (so >= 5*price
+    USD), while a MARKET order needs only ~$1. When the suggested stake is below
+    the 5-share limit floor, the result flags it and points you to a market
+    order (returns `min_limit_usd`, `limit_placeable_at_suggested`, `note`)."""
+    if price is None:
+        return {"suggested_usd": _analytics.suggest_size(edge, bankroll, kelly_fraction)}
+    return _analytics.sizing_plan(edge, bankroll, price=price,
+                                  kelly_fraction=kelly_fraction)
 
 
 # --- Safety ---

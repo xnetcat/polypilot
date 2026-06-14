@@ -35,6 +35,32 @@ def _hours_until(end_date: str) -> float | None:
     return round((dt - now).total_seconds() / 3600.0, 2)
 
 
+def _parse_market_economics(m: dict) -> dict:
+    """Extract order/fee economics from a raw Gamma market dict (defensive).
+
+    Returns kwargs for ``Market``: ``min_order_size``, ``tick_size``,
+    ``fee_rate``, ``fee_exponent``, ``fees_enabled``. Gamma exposes
+    ``orderMinSize`` (min shares), ``orderPriceMinTickSize`` (price increment),
+    ``feesEnabled``, and a ``feeSchedule`` ``{rate, exponent, takerOnly}``; the
+    V2 platform fee is ``rate * (price*(1-price))**exponent`` and is 0 when fees
+    are disabled. Any missing/odd field falls back to the platform-wide norm."""
+    econ = {"min_order_size": 5.0, "tick_size": 0.01,
+            "fee_rate": 0.0, "fee_exponent": 1.0, "fees_enabled": False}
+    try:
+        if m.get("orderMinSize") is not None:
+            econ["min_order_size"] = float(m["orderMinSize"])
+        if m.get("orderPriceMinTickSize") is not None:
+            econ["tick_size"] = float(m["orderPriceMinTickSize"])
+        econ["fees_enabled"] = bool(m.get("feesEnabled", False))
+        sched = m.get("feeSchedule")
+        if econ["fees_enabled"] and isinstance(sched, dict):
+            econ["fee_rate"] = float(sched.get("rate", 0.0) or 0.0)
+            econ["fee_exponent"] = float(sched.get("exponent", 1.0) or 1.0)
+    except (TypeError, ValueError):
+        pass
+    return econ
+
+
 @dataclass
 class Market:
     condition_id: str
@@ -47,6 +73,13 @@ class Market:
     active: bool
     tokens: list[dict]
     is_binary: bool = True
+    # Order/fee economics (from Gamma). Defaults are the platform-wide norms so a
+    # CLOB-fallback market (which lacks these) still behaves sanely.
+    min_order_size: float = 5.0      # min shares for a (limit) order
+    tick_size: float = 0.01          # min price increment
+    fee_rate: float = 0.0            # V2 fee schedule rate (0 when fees disabled)
+    fee_exponent: float = 1.0        # V2 fee schedule exponent
+    fees_enabled: bool = False
 
     @property
     def implied_probability(self) -> float:
@@ -68,6 +101,11 @@ class Market:
             "end_date": self.end_date,
             "hours_to_close": self.hours_to_close,
             "active": self.active,
+            "min_order_size": self.min_order_size,
+            "tick_size": self.tick_size,
+            "fee_rate": self.fee_rate,
+            "fee_exponent": self.fee_exponent,
+            "fees_enabled": self.fees_enabled,
             "tokens": self.tokens,
             "is_binary": self.is_binary,
             "outcomes": [
@@ -158,6 +196,7 @@ def fetch_active_markets(limit: int = 50) -> list[Market]:
                 active=m.get("active", True),
                 tokens=token_list,
                 is_binary=is_binary,
+                **_parse_market_economics(m),
             ))
         except (KeyError, ValueError, TypeError):
             continue
@@ -243,6 +282,7 @@ def fetch_market(condition_id: str) -> Market | None:
                 active=m.get("active", True),
                 tokens=token_list,
                 is_binary=_has_binary_tokens(token_list),
+                **_parse_market_economics(m),
             )
         except (KeyError, ValueError, TypeError):
             continue

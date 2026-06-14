@@ -6,6 +6,10 @@ import httpx
 
 from . import config, notifications, order_book, risk, state
 
+# Polymarket rejects a LIMIT order below this many shares ("Size lower than the
+# minimum: 5"); MARKET (FAK) orders have no share floor (just ~$1 notional).
+_MIN_LIMIT_SHARES = 5.0
+
 
 def place_order(*, mode: str | None = None, market_id: str, token_id: str,
                 question: str, category: str, side: str, size_usd: float,
@@ -38,6 +42,19 @@ def place_order(*, mode: str | None = None, market_id: str, token_id: str,
     if order_type not in {"market", "limit"}:
         return {"status": "rejected",
                 "reason": f"order_type must be 'market' or 'limit', got {order_type!r}"}
+
+    # Limit orders have a 5-share exchange minimum (market/FAK orders don't).
+    # Pre-check so a too-small limit returns an actionable rejection instead of an
+    # opaque CLOB 400; enforced in BOTH modes so paper mirrors live. Take a
+    # smaller position with a market order instead.
+    if order_type == "limit" and limit_price and limit_price > 0:
+        shares = size_usd / limit_price
+        if shares < _MIN_LIMIT_SHARES:
+            return {"status": "rejected",
+                    "reason": (f"limit order is {shares:.2f} shares; exchange minimum "
+                               f"is {_MIN_LIMIT_SHARES:g} (= ${_MIN_LIMIT_SHARES * limit_price:.2f} "
+                               f"at {limit_price}). Use a market order for a smaller "
+                               f"position, or raise size_usd.")}
 
     ok, reason = risk.check_kill_switch(mode)
     if not ok:

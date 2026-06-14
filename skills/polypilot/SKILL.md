@@ -129,11 +129,24 @@ where your own data disagrees, trust your data.
    yes_price)` and `suggest_size(...)`. YOU decide whether the edge clears your
    bar and how much to stake. There is no hardcoded threshold — use judgment, and
    be willing to skip a whole cycle.
+   - **Use the REAL fee — it's tiny on favorites.** Polymarket V2 fees are
+     price-dependent (`rate·(p·(1−p))^exp`): near-zero at the extremes and 0 on
+     fee-free markets — NOT a flat 2%. Pass the market's `fee_rate`/`fee_exponent`
+     (on the market dict; 0 when `fees_enabled` is false) to `compute_edge` so you
+     don't under-rate a good favorite trade. **Don't reason at the midpoint** for a
+     real entry: call `compute_edge_from_book(token_id, fair_prob, fee_rate, ...)`
+     to get the edge at the actual best ask you'd pay (the spread can erase a
+     mid-based edge).
 6. **Trade** — `place_order(...)` with your `thesis`, `confidence`, `fair_prob`.
    Pass the `token_id` whose `outcome` matches the side you're buying (from
    `get_market`'s `tokens`/`outcomes` list) — settlement keys off that token. On a
    fill, call `send_notification(...)` (or rely on the server's auto-notify) when
    a webhook/Telegram is configured. If it returns `rejected`, respect the reason.
+   - **Order minimums & sizing.** A `limit` order needs **≥5 shares** (so ≥ `5 ×
+     price` USD — e.g. $4.20 at 0.84); a `market` order only needs ~$1. For a
+     small position (common on a tiny bankroll) use `order_type='market'` rather
+     than over-sizing a limit to clear the 5-share floor. Pass `price` to
+     `suggest_size` to see the limit floor and whether your stake is placeable.
    - **Red-team gate (optional).** Before a sizeable trade — e.g. stake `> 5%` of
      bankroll, or above a USD amount you set — dispatch the `polypilot-skeptic`
      subagent (if you have `Task`) to attack the thesis. Pass the proposed
@@ -255,7 +268,7 @@ about fills and kill-switch trips.
   Code) for markets the structured tools don't cover — esports without a key,
   politics, culture, AI, science, geopolitics, novel markets — or when structured
   / `get_news` output is thin or empty. Cite sources; never invent data.
-- **Analytics (advisory)**: `compute_edge`, `suggest_size`.
+- **Analytics (advisory)**: `compute_edge` (price-dependent V2 fee), `compute_edge_from_book` (edge at the real ask), `suggest_size` (pass `price` for order-minimum checks).
 - **Execution**: `place_order` (use `order_type='market'` (default) or `'limit'`
   with a `limit_price` for a resting GTC order), `close_position`.
 - **Live trading ops (place no order; some true-up local state)**:

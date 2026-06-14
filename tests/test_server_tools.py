@@ -17,6 +17,7 @@ EXPECTED_TOOLS = {
     "get_price_history",
     "get_market_signals",
     "compute_edge",
+    "compute_edge_from_book",
     "suggest_size",
     "get_risk_status",
     "get_weather_forecast",
@@ -74,11 +75,11 @@ def _registered_tool_names(server) -> set[str]:
 
 
 def test_registered_tool_set_is_exactly_expected(srv):
-    """The server must register exactly the 41 expected tools — no more, no
+    """The server must register exactly the 42 expected tools — no more, no
     fewer. A drifted set (renamed/added/removed tool) fails here."""
     names = _registered_tool_names(srv)
     assert names == EXPECTED_TOOLS
-    assert len(names) == 41
+    assert len(names) == 42
 
 
 def test_every_tool_resolves_to_callable_attribute(srv):
@@ -104,10 +105,27 @@ def test_get_risk_status_shape(srv):
 
 
 def test_compute_edge_expected_value(srv):
-    # EV = max(0, (fair - yes_price) - 0.02 fee) = (0.60 - 0.45) - 0.02 = 0.13
+    # V2 price-dependent fee at the default rate 0.04, exp 1:
+    #   fee = 0.04*(0.45*0.55) = 0.0099 ; EV = (0.60-0.45) - 0.0099 = 0.1401
     out = srv.compute_edge(0.60, "YES", 0.45)
-    assert out["expected_value"] == 0.13
+    assert out["fee"] == 0.0099
+    assert out["expected_value"] == 0.1401
     assert out["side"] == "YES"
+
+
+def test_compute_edge_fee_free_market(srv):
+    # fee_rate=0 (fees disabled) -> no fee haircut: EV == raw edge.
+    out = srv.compute_edge(0.60, "YES", 0.45, fee_rate=0.0)
+    assert out["fee"] == 0.0
+    assert out["expected_value"] == 0.15
+
+
+def test_compute_edge_favorite_pays_tiny_fee(srv):
+    # A favorite NO at 0.95 (cheap side 0.05) pays almost nothing under the
+    # parabolic V2 fee — the whole point of fixing the flat-2% model.
+    out = srv.compute_edge(0.98, "NO", 0.95, fee_rate=0.04)
+    # fee = 0.04*(0.95*0.05) = 0.0019
+    assert out["fee"] == 0.0019
 
 
 def test_get_portfolio_cash_is_starting_balance(srv):

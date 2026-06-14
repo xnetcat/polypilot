@@ -202,12 +202,12 @@ A single cumulative-loss circuit breaker is the one rule enforced in code:
 Everything else — strategy, edge bar, position sizing, concentration, and
 timing — is the agent's judgment, not hardcoded.
 
-## Tool surface (41 tools)
+## Tool surface (42 tools)
 
 Grouped by purpose. The agent calls what it needs; all tools return plain JSON.
 
 **Markets**
-- `list_markets` — discover active markets (filter by category, min volume, keyword, `binary_only`, or `closing_within_hours` to target soon-resolving markets), sorted by volume. Each dict includes `hours_to_close`.
+- `list_markets` — discover active markets (filter by category, min volume, keyword, `binary_only`, or `closing_within_hours` to target soon-resolving markets), sorted by volume; auto-fetches a larger pool when filtering so niche/soon-closing markets aren't hidden behind the volume sort. Each dict includes `hours_to_close`, `min_order_size`, `tick_size`, and the market's `fee_rate`/`fee_exponent`/`fees_enabled`.
 - `get_market` — full detail for one market by condition id.
 - `get_order_book` — live order book summary for a CLOB token (best bid/ask, spread, midpoint, imbalance, top levels).
 - `get_price_history` — price-history summary for a token over an interval (first/last/high/low/change).
@@ -224,8 +224,9 @@ Grouped by purpose. The agent calls what it needs; all tools return plain JSON.
 > **Web-search fallback.** The structured tools above don't cover every market (politics, culture, AI, geopolitics, novel one-offs, or thin `get_news` results). For those, the agent uses its built-in **`WebSearch`/`WebFetch`** to gather current facts before forming a thesis — never inventing data.
 
 **Analytics** (advisory — calculators, not gates)
-- `compute_edge` — expected value and ROI per $1 after ~2% fees, given your fair probability, side, and the market price.
-- `suggest_size` — advisory half-Kelly stake suggestion.
+- `compute_edge` — expected value and ROI per $1 after the **price-dependent V2 fee** (`rate·(p·(1−p))^exp` — near-zero for favorites, 0 on fee-free markets), given your fair probability, side, and the market price. Pass the market's `fee_rate`/`fee_exponent` for the exact figure.
+- `compute_edge_from_book` — edge computed at the **real executable price** (best ask you'd actually pay) for the token you'd buy, so you don't reason at the midpoint and then eat the spread.
+- `suggest_size` — advisory half-Kelly stake; pass `price` to also check Polymarket's order minimums (5-share limit floor vs ~$1 market floor) and flag an unplaceable limit.
 
 **Execution**
 - `place_order` — buy a side for a USD amount, storing your thesis/confidence/fair_prob; **enforces the kill-switch** and refuses when tripped or cash is short. Supports `order_type` `market` (default; slippage-walked in paper, FAK in live) or `limit` (GTC resting order at `limit_price`).

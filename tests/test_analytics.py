@@ -2,13 +2,13 @@ import polymarket_mcp.analytics as a
 
 
 def test_expected_value_yes():
-    # fair 0.60, price 0.45, YES -> raw 0.15 - 0.02 fee = 0.13
-    assert round(a.expected_value(0.60, "YES", 0.45), 4) == 0.13
+    # fair 0.60, price 0.45, YES -> raw 0.15 - V2 fee 0.04*(0.45*0.55)=0.0099 = 0.1401
+    assert round(a.expected_value(0.60, "YES", 0.45), 4) == 0.1401
 
 
 def test_expected_value_no():
-    # fair 0.30, price 0.45 -> NO raw 0.45-0.30=0.15 -0.02 = 0.13
-    assert round(a.expected_value(0.30, "NO", 0.45), 4) == 0.13
+    # fair 0.30, price 0.45 -> NO raw 0.45-0.30=0.15 - 0.0099 = 0.1401
+    assert round(a.expected_value(0.30, "NO", 0.45), 4) == 0.1401
 
 
 def test_expected_value_floors_at_zero():

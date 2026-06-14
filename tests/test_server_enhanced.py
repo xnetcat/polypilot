@@ -685,6 +685,82 @@ def test_get_esports_delegates_to_fetch_esports(srv, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# compute_edge: V2 price-dependent fee
+# --------------------------------------------------------------------------- #
+def test_compute_edge_reports_price_dependent_fee(srv):
+    out = srv.compute_edge(0.60, "YES", 0.45)
+    assert out["fee"] == 0.0099                  # 0.04*(0.45*0.55)
+    assert out["expected_value"] == 0.1401
+
+
+def test_compute_edge_fee_free_market(srv):
+    out = srv.compute_edge(0.60, "YES", 0.45, fee_rate=0.0)
+    assert out["fee"] == 0.0
+    assert out["expected_value"] == 0.15
+
+
+# --------------------------------------------------------------------------- #
+# compute_edge_from_book: edge at the real ask
+# --------------------------------------------------------------------------- #
+def test_compute_edge_from_book_uses_best_ask(srv, monkeypatch):
+    # fetch_order_book returns a summary DICT (best_ask/midpoint/spread/...).
+    monkeypatch.setattr(srv._order_book, "fetch_order_book", lambda tid: {
+        "token_id": tid, "best_bid": 0.80, "best_ask": 0.84, "midpoint": 0.82,
+        "spread": 0.04, "asks": [{"price": 0.84, "size": 25}]})
+    out = srv.compute_edge_from_book("tok", fair_prob=0.92, fee_rate=0.04)
+    assert out["best_ask"] == 0.84
+    # fee at 0.84 = 0.04*(0.84*0.16)=0.0054 ; EV = (0.92-0.84) - 0.0054 = 0.0746
+    assert out["fee"] == 0.0054
+    assert out["expected_value"] == 0.0746
+
+
+def test_compute_edge_from_book_no_asks_errors(srv, monkeypatch):
+    monkeypatch.setattr(srv._order_book, "fetch_order_book",
+                        lambda tid: {"token_id": tid, "best_ask": None, "asks": []})
+    out = srv.compute_edge_from_book("tok", fair_prob=0.9)
+    assert "error" in out
+
+
+# --------------------------------------------------------------------------- #
+# place_order: limit 5-share minimum pre-check
+# --------------------------------------------------------------------------- #
+def test_place_order_limit_below_5_shares_rejected_precheck(srv):
+    # 2 USD / 0.83 = 2.41 shares < 5 -> rejected up front (no fill, no network).
+    out = srv.place_order(market_id="m1", token_id="tok", question="Q",
+        category="weather", side="NO", size_usd=2.0, order_type="limit",
+        limit_price=0.83)
+    assert out["status"] == "rejected"
+    assert "minimum" in out["reason"] and "market order" in out["reason"]
+
+
+def test_place_order_limit_at_5_shares_passes_precheck(srv, monkeypatch):
+    # 4.20 USD / 0.84 = 5.0 shares -> clears the floor; with a stubbed book (the
+    # summary-dict shape _paper_fill consumes) the paper limit then fills.
+    monkeypatch.setattr(srv._order_book, "fetch_order_book", lambda tid: {
+        "token_id": tid, "best_bid": 0.82, "best_ask": 0.84, "spread": 0.02,
+        "midpoint": 0.83, "asks": [{"price": 0.84, "size": 100}]})
+    out = srv.place_order(market_id="m1", token_id="tok", question="Q",
+        category="weather", side="NO", size_usd=4.20, order_type="limit",
+        limit_price=0.84)
+    assert out["status"] == "filled"
+
+
+# --------------------------------------------------------------------------- #
+# suggest_size: order-minimum awareness with a price
+# --------------------------------------------------------------------------- #
+def test_suggest_size_with_price_flags_limit_floor(srv):
+    out = srv.suggest_size(edge=0.04, bankroll=11.69, price=0.84)
+    assert out["min_limit_usd"] == 4.2
+    assert out["limit_placeable_at_suggested"] is False
+    assert "note" in out
+
+
+def test_suggest_size_without_price_is_bare(srv):
+    out = srv.suggest_size(edge=0.1, bankroll=100.0)
+    assert out == {"suggested_usd": 5.0}
+
+
+# --------------------------------------------------------------------------- #
 # check_data_sources -> diagnostics.check_data_sources
 # --------------------------------------------------------------------------- #
 class _DiagResp:
