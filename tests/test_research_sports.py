@@ -132,3 +132,70 @@ def test_fetch_sports_no_teams_returns_error():
     _clear()
     result = sports.fetch_sports("What is the weather today?")
     assert "error" in result
+
+
+# --- secondary source: TheSportsDB fallback when ESPN has no match ---------
+
+def _tsdb_event(home, away, hs, as_, status, sport="Soccer", league="EFL Cup"):
+    return {"event": [{
+        "strEvent": f"{home} vs {away}", "strSport": sport, "strLeague": league,
+        "strHomeTeam": home, "strAwayTeam": away,
+        "intHomeScore": str(hs), "intAwayScore": str(as_),
+        "strStatus": status, "dateEvent": "2026-06-14"}]}
+
+
+def test_thesportsdb_fallback_when_espn_empty(monkeypatch):
+    _clear()
+    payload = _tsdb_event("Arsenal", "Chelsea", 2, 1, "FT")
+
+    def fake_get(url, *a, **k):
+        # ESPN scoreboards return nothing; TheSportsDB returns the event.
+        is_tsdb = "thesportsdb.com" in url
+        body = payload if is_tsdb else {"events": []}
+
+        class R:
+            def raise_for_status(self): pass
+            def json(self): return body
+        return R()
+
+    monkeypatch.setattr(sports.httpx, "get", fake_get)
+    out = sports.fetch_sports("Will Arsenal beat Chelsea?")
+    assert out["source"] == "thesportsdb"          # fell back to the 2nd source
+    assert out["sport"] == "EFL Cup"
+    assert out["status"] == "post"                 # 'FT' -> post
+    assert out["combined_score"] == 3
+    assert {c["team_name"] for c in out["score"]} == {"Arsenal", "Chelsea"}
+
+
+def test_espn_preferred_over_thesportsdb(monkeypatch):
+    _clear()
+
+    def fake_get(url, *a, **k):
+        if "thesportsdb.com" in url:
+            raise AssertionError("TheSportsDB must not be queried when ESPN matched")
+        body = _scoreboard("Arsenal vs Chelsea", "ARS v CHE", state="in",
+                           scores=(1, 1), teams=("Arsenal", "Chelsea"))
+
+        class R:
+            def raise_for_status(self): pass
+            def json(self): return body if "soccer/eng.1" in url else {"events": []}
+        return R()
+
+    monkeypatch.setattr(sports.httpx, "get", fake_get)
+    out = sports.fetch_sports("Arsenal vs Chelsea")
+    assert out["source"] == "espn"
+
+
+def test_tsdb_state_mapping():
+    assert sports._tsdb_state("FT") == "post"
+    assert sports._tsdb_state("NS") == "pre"
+    assert sports._tsdb_state("") == "pre"
+    assert sports._tsdb_state("2H") == "in"
+    assert sports._tsdb_state("Live") == "in"
+
+
+def test_thesportsdb_never_raises_on_error(monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("tsdb down")
+    monkeypatch.setattr(sports.httpx, "get", boom)
+    assert sports._get_thesportsdb_data("Arsenal", "Chelsea") is None

@@ -310,6 +310,71 @@ def _format_espn_score_data(score_data: dict | None) -> str:
     return "\n".join(lines)
 
 
+# Secondary source: TheSportsDB (free, keyless test key "3"). Covers global
+# leagues ESPN's slug list may miss, and gives source redundancy when ESPN has
+# no match.
+_TSDB_BASE = "https://www.thesportsdb.com/api/v1/json/3"
+
+
+def _tsdb_state(status: str) -> str:
+    """Map a TheSportsDB ``strStatus`` to the same state vocabulary as ESPN
+    (pre / in / post)."""
+    s = (status or "").strip().lower()
+    if s in ("ft", "aet", "aot", "pen", "final", "finished", "match finished", "fin"):
+        return "post"
+    if s in ("", "ns", "not started", "sched", "scheduled", "tbd", "postp", "postponed"):
+        return "pre"
+    return "in"  # 1h/2h/ht/live/q1../in progress/...
+
+
+def _get_thesportsdb_data(team1: str, team2: str) -> dict | None:
+    """Secondary score source via TheSportsDB's ``searchevents`` (TeamA_vs_TeamB),
+    mapped to the same score-data shape as the ESPN path. Best-effort; never
+    raises. Returns None when nothing matches or on any error."""
+    if not team1:
+        return None
+    query = (f"{team1}_vs_{team2}" if team2 else team1).replace(" ", "_")
+    try:
+        resp = httpx.get(f"{_TSDB_BASE}/searchevents.php", params={"e": query}, timeout=10)
+        resp.raise_for_status()
+        events = resp.json().get("event") or []
+    except Exception as e:
+        log.debug("[research] TheSportsDB error: %s", e)
+        return None
+
+    t1p = _normalize_team_name(team1, strip_article=True).lower()[:6]
+    t2p = _normalize_team_name(team2, strip_article=True).lower()[:6] if team2 else ""
+    for ev in events:
+        blob = f"{(ev.get('strHomeTeam') or '').lower()} {(ev.get('strAwayTeam') or '').lower()}"
+        if (t1p and t1p not in blob) or (t2p and t2p not in blob):
+            continue
+
+        def _score(v):
+            try:
+                return int(v)
+            except (TypeError, ValueError):
+                return None
+
+        state = _tsdb_state(ev.get("strStatus"))
+        hs, as_ = _score(ev.get("intHomeScore")), _score(ev.get("intAwayScore"))
+        competitors = [
+            {"team_name": ev.get("strHomeTeam") or "Unknown",
+             "score": hs if hs is not None else 0, "home_away": "home"},
+            {"team_name": ev.get("strAwayTeam") or "Unknown",
+             "score": as_ if as_ is not None else 0, "home_away": "away"},
+        ]
+        combined = (hs + as_) if (hs is not None and as_ is not None
+                                  and state in ("post", "in")) else None
+        return {
+            "sport": ev.get("strLeague") or ev.get("strSport") or "thesportsdb",
+            "state": state,
+            "detail": ev.get("strStatus") or "",
+            "competitors": competitors,
+            "combined_score": combined,
+        }
+    return None
+
+
 def _get_sports_research(question: str) -> dict | None:
     cached = cache_get(_CACHE, question, CACHE_TTL_SECONDS)
     if cached is not _MISS:
@@ -319,21 +384,31 @@ def _get_sports_research(question: str) -> dict | None:
         log.debug("[research] Could not extract teams from: %s", question[:80])
         return None
     team1, team2 = teams
+    # Primary: ESPN (live scoreboards). Fallback: TheSportsDB (global coverage)
+    # when ESPN has no match — so the agent gets data from more than one source.
     score_data = _get_espn_score_data(team1, team2, question)
-    # The slug comes from the matched scoreboard (dynamic) when a game was found,
-    # else from an explicit league keyword if the question named one.
+    source = "espn"
+    if not score_data:
+        score_data = _get_thesportsdb_data(team1, team2)
+        if score_data:
+            source = "thesportsdb"
+    # The slug/league comes from the matched data when a game was found, else from
+    # an explicit league keyword if the question named one.
     sport_slug = (score_data or {}).get("sport") or _detect_sport(question)
+    if source == "espn":
+        source_url = (
+            f"https://site.api.espn.com/apis/site/v2/sports/{sport_slug}/scoreboard"
+            if sport_slug else ""
+        )
+    else:
+        source_url = f"{_TSDB_BASE}/searchevents.php"
     result = {
         "team1": team1,
         "team2": team2,
-        "source": "espn",
-        "source_url": (
-            f"https://site.api.espn.com/apis/site/v2/sports/{sport_slug}/scoreboard"
-            if sport_slug
-            else ""
-        ),
+        "source": source,
+        "source_url": source_url,
         "sport_slug": sport_slug,
-        "espn_data": score_data,
+        "espn_data": score_data,   # score data from whichever source matched
         "espn_summary": _format_espn_score_data(score_data) if score_data else "",
     }
     cache_set(_CACHE, question, result)
