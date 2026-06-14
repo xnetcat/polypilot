@@ -160,7 +160,9 @@ def test_crypto_no_asset_returns_error():
 # sports — sport detection + team extraction
 # --------------------------------------------------------------------------- #
 def test_sports_detect_nba():
-    assert sports._detect_sport("Will the Lakers cover tonight?") == "basketball/nba"
+    # Detection is keyword-only now; bare team names resolve dynamically instead.
+    assert sports._detect_sport("Will the Lakers cover tonight in the NBA?") == "basketball/nba"
+    assert sports._detect_sport("Will the Lakers cover tonight?") is None
 
 
 def test_sports_detect_nfl():
@@ -175,9 +177,11 @@ def test_sports_detect_soccer_league_keyword():
     )
 
 
-def test_sports_detect_soccer_by_team():
-    """A bare soccer club name maps to its league even without a keyword."""
-    assert sports._detect_sport("Bayern vs Dortmund this weekend?") == "soccer/ger.1"
+def test_sports_detect_soccer_league_keyword_bundesliga():
+    """A league keyword maps to the ESPN soccer slug; bare club names do not
+    (those are resolved dynamically against live scoreboards)."""
+    assert sports._detect_sport("Bayern vs Dortmund in the Bundesliga?") == "soccer/ger.1"
+    assert sports._detect_sport("Bayern vs Dortmund this weekend?") is None
 
 
 def test_sports_extract_teams_vs():

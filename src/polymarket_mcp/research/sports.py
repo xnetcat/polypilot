@@ -20,18 +20,54 @@ log = logging.getLogger(__name__)
 CACHE_TTL_SECONDS: float = DEFAULT_TTL_SECONDS
 _CACHE: dict[str, tuple[float, dict | None]] = {}
 
+# League NAME keywords -> ESPN scoreboard slug. A small, stable fast-path for
+# when the question names the league explicitly (NOT team names — those are
+# resolved dynamically against live scoreboards, see _ESPN_LEAGUES).
 _ESPN_SPORTS = {
     "nba": "basketball/nba",
+    "wnba": "basketball/wnba",
     "nfl": "football/nfl",
     "nhl": "hockey/nhl",
     "mlb": "baseball/mlb",
     "premier league": "soccer/eng.1",
+    "epl": "soccer/eng.1",
     "la liga": "soccer/esp.1",
     "serie a": "soccer/ita.1",
     "bundesliga": "soccer/ger.1",
-    "champions league": "soccer/uefa.champions",
+    "ligue 1": "soccer/fra.1",
+    "eredivisie": "soccer/ned.1",
+    "primeira liga": "soccer/por.1",
+    "liga mx": "soccer/mex.1",
     "mls": "soccer/usa.1",
+    "brasileirao": "soccer/bra.1",
+    "brasileirão": "soccer/bra.1",
+    "champions league": "soccer/uefa.champions",
+    "ucl": "soccer/uefa.champions",
+    "europa league": "soccer/uefa.europa",
+    "saudi pro league": "soccer/ksa.1",
+    "college football": "football/college-football",
+    "college basketball": "basketball/mens-college-basketball",
 }
+
+# Ordered list of ESPN scoreboard slugs probed to resolve a game DYNAMICALLY by
+# matching the question's teams against live scoreboards — no hardcoded team
+# lists. Covers the US majors plus the major global soccer leagues; extend
+# coverage by adding a slug here (a wrong/unknown slug just returns no events).
+# Ordered most-likely-first so the common cases match early and stop the probe.
+_ESPN_LEAGUES = [
+    "baseball/mlb", "basketball/nba", "hockey/nhl", "football/nfl",
+    "basketball/wnba",
+    "soccer/eng.1", "soccer/esp.1", "soccer/ita.1", "soccer/ger.1",
+    "soccer/fra.1", "soccer/usa.1", "soccer/mex.1",
+    "soccer/uefa.champions", "soccer/uefa.europa",
+    "soccer/ned.1", "soccer/por.1", "soccer/bra.1", "soccer/arg.1",
+    "soccer/ksa.1", "soccer/eng.2",
+    "football/college-football", "basketball/mens-college-basketball",
+]
+
+# Per-(slug, date) scoreboard cache so probing many leagues in a cycle — and
+# re-checking the same game across cycles — doesn't re-hit ESPN every time.
+_SCOREBOARD_CACHE: dict[str, tuple[float, list]] = {}
 
 
 def _extract_date(question: str) -> str | None:
@@ -52,69 +88,17 @@ def _extract_date(question: str) -> str | None:
 
 
 def _detect_sport(question: str) -> str | None:
-    """Detect which ESPN sport endpoint to use from the question."""
+    """Return an ESPN slug only when the question names the LEAGUE explicitly.
+
+    Team→sport is intentionally NOT hardcoded — that is resolved dynamically by
+    matching the question's teams against live scoreboards (see
+    ``_get_espn_score_data``). This keyword fast-path just avoids probing every
+    league when the league is named outright (e.g. "Premier League", "NBA")."""
     q = question.lower()
-    for keyword, slug in _ESPN_SPORTS.items():
+    # Longest keyword first so "college football" wins over a stray "football".
+    for keyword in sorted(_ESPN_SPORTS, key=len, reverse=True):
         if keyword in q:
-            return slug
-    nba_teams = ["lakers", "celtics", "warriors", "nuggets", "bucks", "suns", "knicks",
-                 "heat", "76ers", "cavaliers", "thunder", "clippers", "nets", "bulls",
-                 "hawks", "mavericks", "grizzlies", "timberwolves", "pelicans", "kings",
-                 "trail blazers", "blazers", "rockets", "spurs", "magic", "pacers",
-                 "hornets", "pistons", "wizards", "raptors", "jazz"]
-    nhl_teams = ["bruins", "rangers", "maple leafs", "oilers", "avalanche", "panthers",
-                 "hurricanes", "stars", "jets", "wild", "lightning", "devils", "islanders",
-                 "penguins", "capitals", "senators", "flames", "canucks", "predators",
-                 "golden knights", "blues", "kraken", "flyers", "red wings", "blackhawks",
-                 "sabres", "coyotes", "sharks", "ducks", "canadiens", "blue jackets"]
-    # MLB / NFL nicknames. Names that collide across sports — "giants" and
-    # "cardinals" (MLB vs NFL), "rangers"/"jets"/"panthers" (vs NHL) — are
-    # deliberately OMITTED so they don't mis-route; rely on an explicit league
-    # keyword for those. Covers the common, unambiguous teams.
-    mlb_teams = ["rays", "angels", "yankees", "red sox", "blue jays", "orioles",
-                 "astros", "athletics", "mariners", "twins", "white sox",
-                 "guardians", "royals", "tigers", "dodgers", "padres",
-                 "diamondbacks", "dbacks", "rockies", "brewers", "reds", "cubs",
-                 "pirates", "phillies", "mets", "braves", "nationals", "marlins"]
-    nfl_teams = ["chiefs", "eagles", "49ers", "niners", "cowboys", "bills",
-                 "dolphins", "patriots", "ravens", "bengals", "browns",
-                 "steelers", "colts", "jaguars", "titans", "broncos", "chargers",
-                 "raiders", "packers", "vikings", "lions", "buccaneers", "saints",
-                 "falcons", "seahawks", "commanders", "texans", "bears"]
-    if any(t in q for t in nba_teams):
-        return "basketball/nba"
-    if any(t in q for t in nhl_teams):
-        return "hockey/nhl"
-    if any(t in q for t in mlb_teams):
-        return "baseball/mlb"
-    if any(t in q for t in nfl_teams):
-        return "football/nfl"
-    # Soccer — map teams to their actual league
-    _soccer_league_map = {
-        "arsenal": "soccer/eng.1", "liverpool": "soccer/eng.1", "man city": "soccer/eng.1",
-        "chelsea": "soccer/eng.1", "tottenham": "soccer/eng.1", "manchester united": "soccer/eng.1",
-        "manchester city": "soccer/eng.1", "aston villa": "soccer/eng.1", "newcastle": "soccer/eng.1",
-        "barcelona": "soccer/esp.1", "real madrid": "soccer/esp.1", "atletico": "soccer/esp.1",
-        "sevilla": "soccer/esp.1", "villarreal": "soccer/esp.1",
-        "bayern": "soccer/ger.1", "dortmund": "soccer/ger.1", "leverkusen": "soccer/ger.1",
-        "leipzig": "soccer/ger.1",
-        "juventus": "soccer/ita.1", "inter milan": "soccer/ita.1", "ac milan": "soccer/ita.1",
-        "napoli": "soccer/ita.1", "roma": "soccer/ita.1", "lazio": "soccer/ita.1",
-        "psg": "soccer/fra.1", "marseille": "soccer/fra.1", "lyon": "soccer/fra.1",
-        "sporting cp": "soccer/por.1", "benfica": "soccer/por.1", "porto": "soccer/por.1",
-        "club américa": "soccer/mex.1", "chivas": "soccer/mex.1", "cruz azul": "soccer/mex.1",
-        "tigres": "soccer/mex.1", "monterrey": "soccer/mex.1", "santos laguna": "soccer/mex.1",
-        "juárez": "soccer/mex.1", "juarez": "soccer/mex.1", "tijuana": "soccer/mex.1",
-        "león": "soccer/mex.1", "leon": "soccer/mex.1", "toluca": "soccer/mex.1",
-        "pachuca": "soccer/mex.1", "atlas": "soccer/mex.1", "puebla": "soccer/mex.1",
-        "mazatlán": "soccer/mex.1", "necaxa": "soccer/mex.1", "querétaro": "soccer/mex.1",
-        "champions league": "soccer/uefa.champions",
-    }
-    if "champions league" in q or "ucl" in q:
-        return "soccer/uefa.champions"
-    for team, league in _soccer_league_map.items():
-        if team in q:
-            return league
+            return _ESPN_SPORTS[keyword]
     return None
 
 
@@ -200,79 +184,102 @@ def _extract_teams_from_question(question: str) -> tuple[str, str] | None:
     return None
 
 
+def _fetch_scoreboard(slug: str, date_str: str | None) -> list:
+    """Fetch one ESPN scoreboard page for ``slug`` (optional ``YYYYMMDD`` date),
+    cached per (slug, date) with the module TTL so probing many leagues in a
+    cycle doesn't re-hit ESPN. Returns the events list ([] on any error)."""
+    key = f"{slug}:{date_str or 'now'}"
+    cached = cache_get(_SCOREBOARD_CACHE, key, CACHE_TTL_SECONDS)
+    if cached is not _MISS:
+        return cached
+    url = f"https://site.api.espn.com/apis/site/v2/sports/{slug}/scoreboard"
+    try:
+        resp = httpx.get(url, params=({"dates": date_str} if date_str else {}), timeout=10)
+        resp.raise_for_status()
+        events = resp.json().get("events", []) or []
+    except Exception:
+        events = []
+    cache_set(_SCOREBOARD_CACHE, key, events)
+    return events
+
+
+def _event_matches(event: dict, t1_lower: str, t2_lower: str) -> bool:
+    """True when both teams (6-char prefix) appear in the event's name/shortName."""
+    name = event.get("name", "").lower()
+    short_name = event.get("shortName", "").lower()
+    t1_match = t1_lower[:6] in name or t1_lower[:6] in short_name
+    t2_match = not t2_lower or t2_lower[:6] in name or t2_lower[:6] in short_name
+    return t1_match and t2_match
+
+
+def _structure_event(event: dict, slug: str) -> dict:
+    """Reduce a matched ESPN event into the score-data dict (state/detail/
+    competitors/combined_score), tagged with the league ``slug`` it came from."""
+    competition = event.get("competitions", [{}])[0]
+    status_type = competition.get("status", {}).get("type", {})
+    state = status_type.get("state", "pre")
+    detail = status_type.get("detail", "")
+    structured = []
+    total = 0
+    total_available = True
+    for competitor in competition.get("competitors", []):
+        try:
+            score_val = int(competitor.get("score", "0"))
+        except (TypeError, ValueError):
+            score_val = 0
+            total_available = False
+        structured.append({
+            "team_name": competitor.get("team", {}).get("displayName", "Unknown"),
+            "score": score_val,
+            "home_away": competitor.get("homeAway", ""),
+        })
+        total += score_val
+    return {
+        "sport": slug,
+        "state": state,
+        "detail": detail,
+        "competitors": structured,
+        "combined_score": total if total_available and state in ("post", "in") else None,
+    }
+
+
 def _get_espn_score_data(team1: str, team2: str, question: str) -> dict | None:
-    sport = _detect_sport(question)
-    if not sport:
+    """Resolve a game's ESPN score data by matching the teams against live
+    scoreboards. If the league is named, probe just that one across a date
+    window; otherwise probe ``_ESPN_LEAGUES`` (today + any explicit date) and
+    return the first league whose scoreboard contains both teams — fully dynamic,
+    no hardcoded team->sport map. Never raises.
+
+    Strip the leading article for matching so "the Lakers" keys on "lakers".
+    """
+    t1_lower = _normalize_team_name(team1, strip_article=True).lower()
+    if not t1_lower:
         return None
+    t2_lower = _normalize_team_name(team2, strip_article=True).lower() if team2 else ""
+
+    base = datetime.now(timezone.utc)
+    target_date = _extract_date(question)
+    target_str = target_date.replace("-", "") if target_date else None
+    keyword_slug = _detect_sport(question)
+
+    if keyword_slug:
+        # League known: search it across today..+3 days (+ any explicit date).
+        slugs = [keyword_slug]
+        dates = [(base + timedelta(days=d)).strftime("%Y%m%d") for d in range(4)]
+        if target_str and target_str not in dates:
+            dates.insert(0, target_str)
+    else:
+        # League unknown: probe the league list, but keep it cheap — today only
+        # (the live-games case), plus an explicit date when the question gives one.
+        slugs = _ESPN_LEAGUES
+        dates = [target_str] if target_str else [base.strftime("%Y%m%d")]
 
     try:
-        # Query today + next 3 days to catch upcoming games.
-        base = datetime.now(timezone.utc)
-        dates_to_check = [(base + timedelta(days=d)).strftime("%Y%m%d") for d in range(4)]
-
-        # Also try to extract a specific date from the question (string YYYY-MM-DD).
-        target_date = _extract_date(question)
-        if target_date:
-            target_str = target_date.replace("-", "")
-            if target_str not in dates_to_check:
-                dates_to_check.insert(0, target_str)
-
-        url = f"https://site.api.espn.com/apis/site/v2/sports/{sport}/scoreboard"
-        all_events = []
-        for date_str in dates_to_check:
-            try:
-                resp = httpx.get(url, params={"dates": date_str}, timeout=10)
-                resp.raise_for_status()
-                data = resp.json()
-                all_events.extend(data.get("events", []))
-            except Exception:
-                continue
-
-        if not all_events:
-            return None
-
-        # Strip the leading article for the prefix match so "the Lakers" keys on
-        # "lakers" rather than "the La" (which would never hit the ESPN name).
-        t1_lower = _normalize_team_name(team1, strip_article=True).lower()
-        t2_lower = _normalize_team_name(team2, strip_article=True).lower() if team2 else ""
-        for event in all_events:
-            name = event.get("name", "").lower()
-            short_name = event.get("shortName", "").lower()
-            t1_match = t1_lower[:6] in name or t1_lower[:6] in short_name
-            t2_match = not t2_lower or t2_lower[:6] in name or t2_lower[:6] in short_name
-            if t1_match and t2_match:
-                competition = event.get("competitions", [{}])[0]
-                status_type = competition.get("status", {}).get("type", {})
-                state = status_type.get("state", "pre")
-                detail = status_type.get("detail", "")
-
-                competitors = competition.get("competitors", [])
-                structured_competitors = []
-                total = 0
-                total_available = True
-                for competitor in competitors:
-                    score_str = competitor.get("score", "0")
-                    try:
-                        score_val = int(score_str)
-                    except (TypeError, ValueError):
-                        score_val = 0
-                        total_available = False
-                    structured_competitors.append(
-                        {
-                            "team_name": competitor.get("team", {}).get("displayName", "Unknown"),
-                            "score": score_val,
-                            "home_away": competitor.get("homeAway", ""),
-                        }
-                    )
-                    total += score_val
-
-                return {
-                    "sport": sport,
-                    "state": state,
-                    "detail": detail,
-                    "competitors": structured_competitors,
-                    "combined_score": total if total_available and state in ("post", "in") else None,
-                }
+        for slug in slugs:
+            for date_str in dates:
+                for event in _fetch_scoreboard(slug, date_str):
+                    if _event_matches(event, t1_lower, t2_lower):
+                        return _structure_event(event, slug)
         return None
     except Exception as e:
         log.debug("[research] ESPN fetch error: %s", e)
@@ -312,8 +319,10 @@ def _get_sports_research(question: str) -> dict | None:
         log.debug("[research] Could not extract teams from: %s", question[:80])
         return None
     team1, team2 = teams
-    sport_slug = _detect_sport(question)
     score_data = _get_espn_score_data(team1, team2, question)
+    # The slug comes from the matched scoreboard (dynamic) when a game was found,
+    # else from an explicit league keyword if the question named one.
+    sport_slug = (score_data or {}).get("sport") or _detect_sport(question)
     result = {
         "team1": team1,
         "team2": team2,

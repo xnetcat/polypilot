@@ -6,59 +6,120 @@ import polymarket_mcp.research.sports as sports
 FIX = Path(__file__).parent / "fixtures"
 
 
-def test_detect_sport_mlb_and_nfl_by_team():
-    # MLB and NFL teams must resolve to their ESPN leagues (previously null,
-    # which silently disabled live-score lookups for those games).
-    assert sports._detect_sport("Tampa Bay Rays vs. Los Angeles Angels: O/U 5.5") == "baseball/mlb"
-    assert sports._detect_sport("Will the Dodgers beat the Mets?") == "baseball/mlb"
-    assert sports._detect_sport("Will the Chiefs beat the Eagles?") == "football/nfl"
+def _clear():
+    sports._CACHE.clear()
+    sports._SCOREBOARD_CACHE.clear()
 
 
-def test_detect_sport_nba_nhl_still_work():
-    assert sports._detect_sport("Will the Lakers win tonight?") == "basketball/nba"
-    assert sports._detect_sport("Bruins vs Rangers") == "hockey/nhl"
+def _scoreboard(name, short, state="in", scores=(110, 105), teams=("Home", "Away")):
+    """A minimal ESPN scoreboard payload with one event."""
+    return {"events": [{
+        "name": name, "shortName": short,
+        "competitions": [{
+            "status": {"type": {"state": state, "detail": "Q4 2:00"}},
+            "competitors": [
+                {"team": {"displayName": teams[0]}, "score": str(scores[0]), "homeAway": "home"},
+                {"team": {"displayName": teams[1]}, "score": str(scores[1]), "homeAway": "away"},
+            ],
+        }],
+    }]}
 
 
-def test_detect_sport_explicit_league_keyword_wins():
-    assert sports._detect_sport("MLB: who wins the World Series?") == "baseball/mlb"
+def _mock_by_slug(monkeypatch, slug_to_payload):
+    """Mock httpx.get so each ESPN scoreboard slug returns its mapped payload
+    (matched by substring); any other slug returns no events. This lets the
+    dynamic league probe find the game under the CORRECT league only."""
+    def fake_get(url, *a, **k):
+        payload = {"events": []}
+        for sub, data in slug_to_payload.items():
+            if sub in url:
+                payload = data
+                break
+
+        class R:
+            def raise_for_status(self): pass
+            def json(self): return payload
+        return R()
+
+    monkeypatch.setattr(sports.httpx, "get", fake_get)
+
+
+# --- detection is keyword-only; team->league is dynamic -------------------
+
+def test_detect_sport_is_keyword_only():
+    # League NAMES resolve; bare TEAM names do NOT (resolved dynamically instead).
+    assert sports._detect_sport("MLB: who wins tonight?") == "baseball/mlb"
     assert sports._detect_sport("Premier League title winner") == "soccer/eng.1"
+    assert sports._detect_sport("College Football championship") == "football/college-football"
+    assert sports._detect_sport("Tampa Bay Rays vs. Los Angeles Angels") is None
+    assert sports._detect_sport("Will the Lakers beat the Celtics?") is None
 
 
-def test_fetch_sports_parses_event(monkeypatch):
-    sports._CACHE.clear()
+# --- dynamic resolution: team names matched against live scoreboards -------
+
+def test_dynamic_resolves_league_by_matching_teams(monkeypatch):
+    _clear()
+    # No league keyword; only the MLB scoreboard has this game -> probe finds it.
+    _mock_by_slug(monkeypatch, {
+        "baseball/mlb": _scoreboard(
+            "Tampa Bay Rays at Los Angeles Angels", "TB @ LAA",
+            state="in", scores=(3, 2), teams=("Los Angeles Angels", "Tampa Bay Rays")),
+    })
+    out = sports.fetch_sports("Tampa Bay Rays vs. Los Angeles Angels: O/U 5.5")
+    assert out["sport"] == "baseball/mlb"      # discovered dynamically, no hardcoding
+    assert out["status"] == "in"               # live game
+    assert out["combined_score"] == 5          # 3 + 2 runs (for the O/U)
+    assert {c["team_name"] for c in out["score"]} == {"Los Angeles Angels", "Tampa Bay Rays"}
+
+
+def test_dynamic_resolves_global_soccer(monkeypatch):
+    _clear()
+    # A global league (EPL) the bot has no team list for — found by probing.
+    _mock_by_slug(monkeypatch, {
+        "soccer/eng.1": _scoreboard(
+            "Arsenal vs Chelsea", "ARS v CHE", state="post", scores=(2, 1),
+            teams=("Arsenal", "Chelsea")),
+    })
+    out = sports.fetch_sports("Will Arsenal beat Chelsea?")
+    assert out["sport"] == "soccer/eng.1"
+    assert out["team1"] == "Arsenal"
+    assert out["status"] == "post"
+
+
+def test_no_match_anywhere_returns_no_score(monkeypatch):
+    _clear()
+    # Teams parse but appear on no probed scoreboard -> no score data, no crash.
+    _mock_by_slug(monkeypatch, {})   # every slug returns empty events
+    out = sports.fetch_sports("Wakanda FC vs Atlantis United")
+    assert out["team1"] == "Wakanda FC"
+    assert out["score"] is None
+
+
+def test_keyword_narrows_probe_to_one_league(monkeypatch):
+    _clear()
+    calls = []
+
+    def fake_get(url, *a, **k):
+        calls.append(url)
+
+        class R:
+            def raise_for_status(self): pass
+            def json(self): return _scoreboard("Lakers at Celtics", "LAL @ BOS",
+                                               teams=("Celtics", "Lakers"))
+        return R()
+
+    monkeypatch.setattr(sports.httpx, "get", fake_get)
+    out = sports.fetch_sports("Will the Lakers beat the Celtics in the NBA?")
+    assert out["sport"] == "basketball/nba"
+    # Only the NBA scoreboard slug was queried (keyword fast-path, no full probe).
+    assert all("basketball/nba" in u for u in calls)
+
+
+def test_fetch_sports_matches_real_fixture(monkeypatch):
+    _clear()
     data = json.loads((FIX / "espn_scoreboard.json").read_text())
-
-    class R:
-        def raise_for_status(self):
-            pass
-
-        def json(self):
-            return data
-
-    monkeypatch.setattr(sports.httpx, "get", lambda *a, **k: R())
-    result = sports.fetch_sports("Will the Lakers beat the Celtics?")
-    assert "sport" in result
-    assert result.get("error") is None or "team1" in result
-    assert result["team1"] == "Lakers"
-    assert result["team2"] == "Celtics"
-    assert result["sport"] == "basketball/nba"
-
-
-def test_fetch_sports_matches_scoreboard_event(monkeypatch):
-    sports._CACHE.clear()
-    data = json.loads((FIX / "espn_scoreboard.json").read_text())
-
-    class R:
-        def raise_for_status(self):
-            pass
-
-        def json(self):
-            return data
-
-    monkeypatch.setattr(sports.httpx, "get", lambda *a, **k: R())
-    # The fixture contains a "New York Knicks at San Antonio Spurs" event.
-    # Use bare team names ("Knicks vs Spurs") so the ESPN substring match (first
-    # 6 chars of each team name) hits the event name.
+    # The fixture is an NBA game; serve it only under the NBA slug.
+    _mock_by_slug(monkeypatch, {"basketball/nba": data})
     result = sports.fetch_sports("Knicks vs Spurs")
     assert result["sport"] == "basketball/nba"
     assert result["team1"] == "Knicks"
@@ -68,6 +129,6 @@ def test_fetch_sports_matches_scoreboard_event(monkeypatch):
 
 
 def test_fetch_sports_no_teams_returns_error():
-    sports._CACHE.clear()
+    _clear()
     result = sports.fetch_sports("What is the weather today?")
     assert "error" in result

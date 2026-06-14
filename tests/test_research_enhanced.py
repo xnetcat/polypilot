@@ -345,8 +345,12 @@ def test_espn_match_succeeds_despite_article_and_tonight(monkeypatch):
     found.
     """
     sports._CACHE.clear()
+    sports._SCOREBOARD_CACHE.clear()
     payload = _espn_two_team_payload("Los Angeles Lakers", "Boston Celtics")
-    monkeypatch.setattr(sports.httpx, "get", lambda *a, **k: _Resp(payload))
+    # League is unknown (no keyword), so the dynamic probe walks leagues; serve
+    # the game only under the NBA slug so it resolves to the correct league.
+    monkeypatch.setattr(sports.httpx, "get",
+        lambda url, *a, **k: _Resp(payload if "basketball/nba" in url else {"events": []}))
 
     result = sports.fetch_sports("Will the Lakers beat the Celtics tonight?")
     assert result.get("error") is None
