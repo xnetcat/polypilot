@@ -113,8 +113,8 @@ where your own data disagrees, trust your data.
      they don't cover everything: **esports, politics, culture, AI, science,
      geopolitics, and novel/one-off markets** have no dedicated structured tool,
      and `get_news` can return thin or empty. For esports markets call
-     `get_esports(question)` (PandaScore-backed — returns match/team data when a
-     PandaScore key is configured; otherwise web-search it). For any market the
+     `get_esports(question)` (PandaScore + keyless TheSportsDB — returns match/team
+     data even without a PandaScore key; web-search only if neither source has it). For any market the
      structured tools don't cover, or when their output is thin/stale/empty, use
      your built-in **`WebSearch` and `WebFetch`** tools (Claude Code) to gather
      current facts — recent news, schedules, official data/announcements, polls,

@@ -217,8 +217,8 @@ Grouped by purpose. The agent calls what it needs; all tools return plain JSON.
 - `get_weather_forecast` — structured forecast (high/low °C, uncertainty) for **any city** parsed from a weather market question; a city catalog is the fast path, with Open-Meteo geocoding resolving anything else. **Multi-source**: Open-Meteo + MET Norway worldwide (concurrent), plus weather.gov for US — so non-US markets also get a second model to cross-check.
 - `get_crypto` — spot price, 24h change, recent history, the threshold direction for the market's target, and (for range/threshold markets) a lognormal `probability` estimate of the target band. Resolves **any listed coin** (alias map + CoinGecko `/search`). **Multi-source**: queries CoinGecko **and** Binance concurrently and returns both under `sources` with a `spot_divergence_pct` — agreement = confidence, a large divergence = a stale/suspect feed.
 - `get_sports` — live game state (status `in`/`pre`/`post`, scores, combined total for O/U) across **global** leagues, with the league resolved **dynamically** by matching teams against live scoreboards (no hardcoded team lists). **Multi-source**: queries ESPN **and** TheSportsDB concurrently and returns both under `sources` with an `agreement`/`sources_agree` check — two independent feeds guard against score errors.
-- `get_esports` — PandaScore-backed game/teams/match-status/score for an esports market (CS2/CS:GO, Dota 2, LoL, Valorant, Overwatch, Rocket League); requires `POLYPILOT_PANDASCORE_KEY`, otherwise returns an error dict so the agent falls back to web search.
-- `get_economic_data` — FRED-backed official economic series (requires `FRED_API_KEY`).
+- `get_esports` — game/teams/match-status/score for an esports market (CS2/CS:GO, Dota 2, LoL, Valorant, Overwatch, Rocket League). **Multi-source**: PandaScore (richer, needs `POLYPILOT_PANDASCORE_KEY`) **and TheSportsDB (keyless)** concurrently — so it returns data **even without a PandaScore key**; `sources` + `agreement` when both resolve. Web-search fallback only when neither has the match.
+- `get_economic_data` — official economic series. **Multi-source**: FRED (`FRED_API_KEY`) plus **BLS (keyless)** for the series BLS originates (CPI, unemployment, payrolls), concurrent, with `sources` + `value_divergence_pct`/`sources_agree`. BLS-backed series return data even without a FRED key.
 - `get_news` — recent headlines (RSS, plus NewsAPI if configured) matching a topic; optional `category` (e.g. `esports`, `sports`, `politics`) prioritizes that category's curated feeds.
 
 > **Web-search fallback.** The structured tools above don't cover every market (politics, culture, AI, geopolitics, novel one-offs, or thin `get_news` results). For those, the agent uses its built-in **`WebSearch`/`WebFetch`** to gather current facts before forming a thesis — never inventing data.
@@ -260,7 +260,7 @@ Grouped by purpose. The agent calls what it needs; all tools return plain JSON.
 **Safety / Pacing**
 - `get_risk_status` — cash, PnL vs. kill-switch limits, breaker state, mode. (Call first each cycle.)
 - `wait_for_next_cycle` — server-side sleep that paces the loop and may return early if a held position nears resolution.
-- `check_data_sources` — diagnose which research APIs are configured (keys) and reachable (CoinGecko/Binance/Open-Meteo/weather.gov/ESPN/RSS/FRED/PandaScore/NewsAPI). `probe=False` for a fast config-only check. Use it to confirm a newly-added key works or to see why a research tool is erroring.
+- `check_data_sources` — diagnose which research APIs are configured (keys) and reachable (CoinGecko/Binance/Open-Meteo/weather.gov/MET-Norway/ESPN/TheSportsDB/RSS/BLS/FRED/PandaScore/NewsAPI). `probe=False` for a fast config-only check. Use it to confirm a newly-added key works or to see why a research tool is erroring.
 - `ping` — health check.
 
 **Notifications**
@@ -289,7 +289,7 @@ Configure via environment variables or a `.env` file (see `.env.example`). The
 | `POLYPILOT_TELEGRAM_CHAT_ID` | _(empty)_ | Telegram chat id for notification delivery. |
 | `FRED_API_KEY` | _(empty)_ | Enables `get_economic_data` (official economy/finance data via FRED). |
 | `NEWSAPI_KEY` | _(empty)_ | Optional — broader news coverage in `get_news`. RSS works with no key. |
-| `POLYPILOT_PANDASCORE_KEY` | _(empty)_ | Enables `get_esports` (match data via [PandaScore](https://pandascore.co); free tier available). Without it, `get_esports` returns an error dict and the agent falls back to web search. |
+| `POLYPILOT_PANDASCORE_KEY` | _(empty)_ | **Optional** — richer `get_esports` data via [PandaScore](https://pandascore.co) (free tier). Without it, `get_esports` still works via the keyless TheSportsDB source. |
 
 ## Running the MCP server standalone
 

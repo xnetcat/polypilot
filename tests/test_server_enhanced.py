@@ -658,17 +658,27 @@ def test_get_portfolio_no_live_balance_in_paper(srv, monkeypatch):
 # --------------------------------------------------------------------------- #
 # get_esports -> esports.fetch_esports
 # --------------------------------------------------------------------------- #
-def test_get_esports_no_key_returns_error_without_network(srv, monkeypatch):
-    # conftest wipes POLYPILOT_PANDASCORE_KEY, so the reloaded config has no key:
-    # a detected-game question must return the no-key error dict and make NO
-    # network call (the module bails on the key check before any httpx.get).
+def test_get_esports_no_key_falls_back_to_thesportsdb(srv, monkeypatch):
+    # No PandaScore key: PandaScore is SKIPPED (no pandascore.co call) but the
+    # keyless TheSportsDB secondary IS queried and supplies the data. Here it
+    # returns nothing, so the result is the no-data dict (steering to web search)
+    # with the PandaScore key-error recorded under sources.
     monkeypatch.setattr(srv._esports.config, "PANDASCORE_KEY", "")
-    monkeypatch.setattr(srv._esports.httpx, "get",
-        lambda *a, **k: pytest.fail("no network call expected without a key"))
+
+    def _routed_get(url, *a, **k):
+        if "pandascore.co" in url:
+            pytest.fail("pandascore.co must not be called without a key")
+
+        class R:
+            def raise_for_status(self): pass
+            def json(self): return {"event": []}   # TheSportsDB: no match
+        return R()
+
+    monkeypatch.setattr(srv._esports.httpx, "get", _routed_get)
     out = srv.get_esports("Will NAVI beat G2 in CS2?")
     assert out["game"] == "csgo"
-    assert out["error"] == "POLYPILOT_PANDASCORE_KEY not set"
-    assert out["source"] == "pandascore"
+    assert out["sources"]["pandascore"]["error"] == "POLYPILOT_PANDASCORE_KEY not set"
+    assert out["sources"]["thesportsdb"] is None
 
 
 def test_get_esports_no_game_detected(srv):
@@ -798,7 +808,9 @@ def test_check_data_sources_probes_keyless_and_skips_unconfigured_keys(srv, monk
     by_name = {s["name"]: s for s in out["sources"]}
 
     # Keyless sources get probed and report reachable on a 2xx.
-    for name in ("coingecko", "binance", "open-meteo", "weather.gov", "espn", "rss"):
+    keyless = ("coingecko", "binance", "open-meteo", "weather.gov", "met.no",
+               "espn", "thesportsdb", "rss", "bls")
+    for name in keyless:
         assert by_name[name]["requires_key"] is False
         assert by_name[name]["reachable"] is True
         assert by_name[name]["status"] == 200
@@ -810,7 +822,7 @@ def test_check_data_sources_probes_keyless_and_skips_unconfigured_keys(srv, monk
         assert by_name[name]["reachable"] is None
 
     assert out["summary"]["keyed_configured"] == 0
-    assert out["summary"]["reachable"] == 6
+    assert out["summary"]["reachable"] == len(keyless)
 
 
 def test_check_data_sources_probes_configured_key(srv, monkeypatch):

@@ -1,16 +1,22 @@
-"""Esports research — PandaScore match data for esports markets.
+"""Esports research — cross-source match data for esports markets.
 
 Best-effort, never-raises lookup for esports markets (CS2/CS:GO, Dota 2,
 League of Legends, Valorant, Overwatch, Rocket League). Detects the game and
-the two teams from the question text, then — when a PandaScore API key is
-configured (``config.PANDASCORE_KEY``) — queries the PandaScore matches API for
-an upcoming/running/finished match involving those teams.
+the two teams from the question text, then queries TWO free data sources
+concurrently for a match involving those teams:
+
+  * PandaScore (``https://api.pandascore.co``) — only when an API key is
+    configured (``config.PANDASCORE_KEY``); rich esports coverage.
+  * TheSportsDB (``https://www.thesportsdb.com``) — keyless (free test key
+    "3"); covers many esports leagues and works with NO PandaScore key.
+
+Querying both gives the agent cross-source confidence when both resolve, and —
+crucially — esports research now returns real data even without a PandaScore
+key (TheSportsDB supplies it) instead of a bare "key not set" error.
 
 Self-contained by design: it replicates a small "A vs B" / "A beat B" team
 extractor (modelled on ``research/sports.py``) rather than importing from
-sports.py, so the two modules stay independent. When no key is set the module
-returns an error dict that tells the caller to fall back to web search; it
-never performs network I/O without a key.
+sports.py, so the two modules stay independent.
 """
 from __future__ import annotations
 
@@ -20,6 +26,7 @@ import re
 import httpx
 
 from .. import config
+from ._concurrent import gather
 
 log = logging.getLogger(__name__)
 
@@ -263,18 +270,141 @@ def _query_pandascore(game: str, team1: str, team2: str) -> dict:
     return result
 
 
-def fetch_esports(question: str) -> dict:
-    """PandaScore-backed data for an esports market: game, teams, match status.
+# --- TheSportsDB (keyless secondary source) -------------------------------
+# TheSportsDB's free test key ("3") gives keyless access to ``searchevents``,
+# which covers many esports leagues. It's the fallback that makes esports
+# research work with NO PandaScore key, and the cross-check that gives
+# confidence when PandaScore IS configured.
+_TSDB_BASE = "https://www.thesportsdb.com/api/v1/json/3"
 
-    Best-effort and never raises. Returns one of:
+# Strings that mark an event's ``strSport`` as esports (lowercased). Anything
+# else (football, basketball, ...) is filtered out — searchevents can return
+# same-named traditional-sports events.
+_TSDB_ESPORTS_SPORTS = {"esports", "e-sports"}
+
+
+def _tsdb_status(status: str) -> str:
+    """Map a TheSportsDB ``strStatus`` to our status vocabulary.
+
+    "FT"/"Match Finished"/"Final" -> "finished"; ""/"NS"/"Not Started" ->
+    "scheduled"; anything else (1h/live/...) -> "live".
+    """
+    s = (status or "").strip().lower()
+    if s in ("ft", "match finished", "final"):
+        return "finished"
+    if s in ("", "ns", "not started"):
+        return "scheduled"
+    return "live"
+
+
+def _tsdb_involves(home: str, away: str, t1_lower: str, t2_lower: str) -> bool:
+    """True when both wanted teams appear among an event's home/away teams.
+
+    Mirrors ``_match_involves``: normalizes the event team names and uses a
+    short (4-char) case-insensitive prefix test in either direction so minor
+    naming differences still match. When ``t2_lower`` is empty only ``t1`` must
+    be present.
+    """
+    names = [
+        _normalize_team_name(home).lower(),
+        _normalize_team_name(away).lower(),
+    ]
+    blob = " ".join(n for n in names if n)
+
+    def _present(needle: str) -> bool:
+        if not needle:
+            return True
+        key = needle[:4]
+        return key in blob or any(name[:4] in needle for name in names if name)
+
+    return _present(t1_lower) and _present(t2_lower)
+
+
+def _query_thesportsdb_esports(team1: str, team2: str) -> dict | None:
+    """Query TheSportsDB (keyless) for an esports event involving the teams.
+
+    Returns ``{game, league, team1, team2, status, opponents, results?,
+    source: "thesportsdb", source_url}`` for the first matching esports event,
+    or None on no match / error / no teams. Never raises (network is wrapped in
+    try/except). Non-esports events (``strSport`` not in esports) are skipped.
+    """
+    if not team1:
+        return None
+
+    source_url = f"{_TSDB_BASE}/searchevents.php"
+    query = (f"{team1}_vs_{team2}" if team2 else team1).replace(" ", "_")
+    try:
+        resp = httpx.get(source_url, params={"e": query}, timeout=10)
+        resp.raise_for_status()
+        events = resp.json().get("event") or []
+    except Exception as e:  # noqa: BLE001 — best-effort, never propagate.
+        log.debug("[research] TheSportsDB esports error: %s", e)
+        return None
+
+    t1_lower = team1.lower()
+    t2_lower = team2.lower()
+    for ev in events:
+        if not isinstance(ev, dict):
+            continue
+        # Keep only esports events; searchevents can match same-named teams in
+        # traditional sports.
+        if (ev.get("strSport") or "").strip().lower() not in _TSDB_ESPORTS_SPORTS:
+            continue
+        home = ev.get("strHomeTeam") or ""
+        away = ev.get("strAwayTeam") or ""
+        if not _tsdb_involves(home, away, t1_lower, t2_lower):
+            continue
+
+        def _score(v):
+            try:
+                return int(v)
+            except (TypeError, ValueError):
+                return None
+
+        league = ev.get("strLeague") or ev.get("strSport") or "thesportsdb"
+        result: dict = {
+            "game": league,
+            "league": league,
+            "team1": team1,
+            "team2": team2,
+            "status": _tsdb_status(ev.get("strStatus")),
+            "scheduled_at": ev.get("dateEvent"),
+            "opponents": [n for n in (home, away) if n],
+            "source": "thesportsdb",
+            "source_url": source_url,
+        }
+        hs, as_ = _score(ev.get("intHomeScore")), _score(ev.get("intAwayScore"))
+        if hs is not None or as_ is not None:
+            result["results"] = [
+                {"team_name": home, "score": hs},
+                {"team_name": away, "score": as_},
+            ]
+        return result
+    return None
+
+
+def _has_match_data(result: dict | None) -> bool:
+    """True when a source result is real match data (a ``status``, not an error)."""
+    return bool(result) and "status" in result and "error" not in result
+
+
+def fetch_esports(question: str) -> dict:
+    """Cross-source data for an esports market: game, teams, match status.
+
+    Best-effort and never raises. Queries PandaScore (only when a key is set)
+    and TheSportsDB (always, keyless) concurrently. Returns one of:
       * ``{"error": "no esports game detected", "question": ...}`` when no
-        supported game keyword is found,
-      * ``{game, team1, team2, error: "POLYPILOT_PANDASCORE_KEY not set",
-        source: "pandascore"}`` when no API key is configured (no network call —
-        the caller should fall back to web search),
-      * ``{game, team1, team2, status, scheduled_at, opponents, results?,
-        source, source_url}`` on a successful PandaScore lookup,
-      * an ``{"error": ...}`` dict on HTTP failure or no match found.
+        supported game keyword is found (NO network call),
+      * a match dict ``{game, team1, team2, status, ..., source, sources,
+        agreement, sources_agree}`` — top-level fields come from PandaScore when
+        it returned real data, else from TheSportsDB,
+      * a no-data dict ``{game, team1, team2, error, note, source, sources, ...}``
+        telling the caller to web-search when NEITHER source resolves.
+
+    ``sources`` always carries the per-source result: ``{"pandascore": <result
+    or {error}>, "thesportsdb": <result or None>}``. ``agreement`` /
+    ``sources_agree`` compare the two sources' status (and scores when both
+    report them) and are None unless BOTH resolved real match data.
     """
     game = _detect_game(question)
     if not game:
@@ -286,13 +416,76 @@ def fetch_esports(question: str) -> dict:
     else:
         team1, team2 = "", ""
 
-    if not config.PANDASCORE_KEY:
-        return {
+    # Fetch both free sources concurrently: PandaScore only with a key (else a
+    # skipped placeholder, no network call), TheSportsDB always (keyless). The
+    # slowest single source bounds the wall-clock; gather never raises.
+    has_key = bool(config.PANDASCORE_KEY)
+    ps_placeholder = {
+        "game": game,
+        "team1": team1,
+        "team2": team2,
+        "error": "POLYPILOT_PANDASCORE_KEY not set",
+        "source": "pandascore",
+    }
+    pandascore_sd, thesportsdb_sd = gather(
+        (lambda: _query_pandascore(game, team1, team2)) if has_key
+        else (lambda: ps_placeholder),
+        lambda: _query_thesportsdb_esports(team1, team2),
+    )
+    # gather returns None on failure; the PandaScore slot always has a dict
+    # (real data, an {error} dict, or the no-key placeholder).
+    if pandascore_sd is None:
+        pandascore_sd = ps_placeholder
+
+    sources = {"pandascore": pandascore_sd, "thesportsdb": thesportsdb_sd}
+
+    # Cross-source agreement is only meaningful when BOTH resolved real data.
+    ps_ok = _has_match_data(pandascore_sd)
+    tsdb_ok = _has_match_data(thesportsdb_sd)
+    if ps_ok and tsdb_ok:
+        status_agree = pandascore_sd.get("status") == thesportsdb_sd.get("status")
+        ps_scores = _result_scores(pandascore_sd)
+        tsdb_scores = thesportsdb_sd.get("results")
+        # Compare scores only when both sides report them; a missing score on
+        # either side doesn't count as a conflict.
+        if ps_scores and tsdb_scores:
+            ps_vals = sorted(s.get("score") for s in ps_scores)
+            tsdb_vals = sorted(s.get("score") for s in tsdb_scores)
+            score_agree = ps_vals == tsdb_vals
+        else:
+            score_agree = None
+        agreement = {"status": status_agree, "score": score_agree}
+        sources_agree = status_agree and (score_agree if score_agree is not None else True)
+    else:
+        agreement = None
+        sources_agree = None
+
+    # Top-level result prefers PandaScore when it returned real match data, else
+    # TheSportsDB. ``source`` names whichever supplied the top-level fields.
+    if ps_ok:
+        result = dict(pandascore_sd)
+    elif tsdb_ok:
+        result = dict(thesportsdb_sd)
+    else:
+        # Neither source resolved: a no-data dict steering the agent to web search.
+        # The key win over the old code: with no PandaScore key, TheSportsDB was
+        # still queried above — this only fires when it ALSO had nothing.
+        result = {
             "game": game,
             "team1": team1,
             "team2": team2,
-            "error": "POLYPILOT_PANDASCORE_KEY not set",
-            "source": "pandascore",
+            "error": "no esports match data found",
+            "note": "no match found in PandaScore/TheSportsDB; fall back to web search",
+            "source": "thesportsdb" if not has_key else "pandascore",
         }
 
-    return _query_pandascore(game, team1, team2)
+    # Always keep the detected game slug + team identity and the cross-source
+    # bundle on the result. (TheSportsDB data carries its own ``league`` name
+    # alongside, but ``game`` stays the detected slug for a consistent shape.)
+    result["game"] = game
+    result["team1"] = team1
+    result["team2"] = team2
+    result["sources"] = sources
+    result["agreement"] = agreement
+    result["sources_agree"] = sources_agree
+    return result

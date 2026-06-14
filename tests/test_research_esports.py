@@ -55,24 +55,118 @@ def test_extract_teams_none():
     assert esports._extract_teams("Who wins the tournament") is None
 
 
-# --- No-key path: never touches the network -------------------------------
+# --- httpx routing helper -------------------------------------------------
+# fetch_esports now hits TWO hosts concurrently. Tests route httpx.get by URL:
+# PandaScore = "pandascore.co", TheSportsDB = "thesportsdb.com".
 
-def test_no_key_returns_error_and_skips_network(monkeypatch):
+
+class _FakeResponse:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self._payload
+
+
+def _router(*, pandascore=None, thesportsdb=None, on_pandascore=None, on_thesportsdb=None):
+    """Build an httpx.get replacement that dispatches by URL host.
+
+    ``pandascore``/``thesportsdb`` give the JSON payload each host returns;
+    ``on_pandascore``/``on_thesportsdb`` are optional callbacks(url, kwargs) for
+    assertions (e.g. recording that a host was/was not hit).
+    """
+    def _fake_get(url, **kwargs):
+        if "pandascore.co" in url:
+            if on_pandascore:
+                on_pandascore(url, kwargs)
+            return _FakeResponse(pandascore if pandascore is not None else [])
+        if "thesportsdb.com" in url:
+            if on_thesportsdb:
+                on_thesportsdb(url, kwargs)
+            return _FakeResponse(
+                thesportsdb if thesportsdb is not None else {"event": []}
+            )
+        raise AssertionError(f"unexpected URL: {url}")
+
+    return _fake_get
+
+
+# A TheSportsDB searchevents payload with the NAVI vs G2 esports event.
+_TSDB_NAVI_G2 = {
+    "event": [
+        {
+            "strEvent": "Natus Vincere vs G2 Esports",
+            "strSport": "Esports",
+            "strLeague": "ESL Pro League",
+            "strHomeTeam": "Natus Vincere",
+            "strAwayTeam": "G2 Esports",
+            "intHomeScore": "2",
+            "intAwayScore": "1",
+            "strStatus": "Match Finished",
+            "dateEvent": "2026-06-14",
+        }
+    ]
+}
+
+
+# --- No-key path: PandaScore skipped, TheSportsDB IS queried ---------------
+
+def test_no_key_skips_pandascore_but_queries_thesportsdb(monkeypatch):
+    # With no key: NO pandascore.co request, but TheSportsDB IS called and its
+    # data is returned (the key behavior change).
     monkeypatch.setattr(esports.config, "PANDASCORE_KEY", "", raising=False)
 
-    def _boom(*args, **kwargs):
-        raise AssertionError("httpx.get must not be called without an API key")
+    hits = {"pandascore": 0, "thesportsdb": 0}
 
-    monkeypatch.setattr(esports.httpx, "get", _boom)
+    def _on_ps(url, kwargs):
+        hits["pandascore"] += 1
+        raise AssertionError("pandascore.co must not be called without a key")
+
+    def _on_tsdb(url, kwargs):
+        hits["thesportsdb"] += 1
+
+    monkeypatch.setattr(
+        esports.httpx,
+        "get",
+        _router(thesportsdb=_TSDB_NAVI_G2, on_pandascore=_on_ps, on_thesportsdb=_on_tsdb),
+    )
+
+    result = esports.fetch_esports("Will Natus Vincere beat G2 in CS2?")
+
+    assert hits["pandascore"] == 0          # PandaScore skipped (no key)
+    assert hits["thesportsdb"] == 1         # TheSportsDB was queried
+    assert result["game"] == "csgo"
+    assert result["team1"] == "Natus Vincere"
+    assert result["team2"] == "G2"
+    # Result is TheSportsDB data, and the no-key PandaScore placeholder is recorded.
+    assert result["source"] == "thesportsdb"
+    assert result["status"] == "finished"
+    assert result["sources"]["pandascore"]["error"] == "POLYPILOT_PANDASCORE_KEY not set"
+    assert result["sources"]["thesportsdb"]["source"] == "thesportsdb"
+
+
+def test_no_key_no_thesportsdb_match_returns_no_data(monkeypatch):
+    # No key AND TheSportsDB has nothing -> a no-data dict steering to web search.
+    monkeypatch.setattr(esports.config, "PANDASCORE_KEY", "", raising=False)
+
+    def _on_ps(url, kwargs):
+        raise AssertionError("pandascore.co must not be called without a key")
+
+    monkeypatch.setattr(
+        esports.httpx,
+        "get",
+        _router(thesportsdb={"event": None}, on_pandascore=_on_ps),
+    )
 
     result = esports.fetch_esports("NAVI vs G2 CS2")
-    assert result == {
-        "game": "csgo",
-        "team1": "NAVI",
-        "team2": "G2 CS2",
-        "error": "POLYPILOT_PANDASCORE_KEY not set",
-        "source": "pandascore",
-    }
+    assert result["game"] == "csgo"
+    assert result["error"] == "no esports match data found"
+    assert "web search" in result["note"]
+    assert result["sources"]["thesportsdb"] is None
+    assert result["sources_agree"] is None
 
 
 # --- With key: parse a sample PandaScore payload --------------------------
@@ -105,29 +199,22 @@ _SAMPLE_MATCHES = [
 ]
 
 
-class _FakeResponse:
-    def __init__(self, payload):
-        self._payload = payload
-        self.last = None
-
-    def raise_for_status(self):
-        pass
-
-    def json(self):
-        return self._payload
-
-
 def test_with_key_parses_match(monkeypatch):
     monkeypatch.setattr(esports.config, "PANDASCORE_KEY", "fake-key-123", raising=False)
 
     captured = {}
 
-    def _fake_get(url, **kwargs):
+    def _on_ps(url, kwargs):
         captured["url"] = url
         captured["headers"] = kwargs.get("headers", {})
-        return _FakeResponse(_SAMPLE_MATCHES)
 
-    monkeypatch.setattr(esports.httpx, "get", _fake_get)
+    # PandaScore returns the sample match; TheSportsDB is routed (empty) so the
+    # concurrent call is satisfied without crashing.
+    monkeypatch.setattr(
+        esports.httpx,
+        "get",
+        _router(pandascore=_SAMPLE_MATCHES, thesportsdb={"event": []}, on_pandascore=_on_ps),
+    )
 
     result = esports.fetch_esports("Will Natus Vincere beat G2 in CS2?")
 
@@ -141,38 +228,80 @@ def test_with_key_parses_match(monkeypatch):
         {"team_id": 10, "score": 1},
         {"team_id": 20, "score": 0},
     ]
+    # PandaScore is the top-level source; TheSportsDB key is present (resolved None).
     assert result["source"] == "pandascore"
     assert result["source_url"] == "https://api.pandascore.co/csgo/matches"
+    assert "thesportsdb" in result["sources"]
+    assert result["sources"]["thesportsdb"] is None
+    assert result["sources"]["pandascore"]["status"] == "running"
+    # Only PandaScore resolved real data, so no cross-source agreement.
+    assert result["sources_agree"] is None
 
     # The key was sent as a bearer token, and the right game endpoint was hit.
     assert captured["url"] == "https://api.pandascore.co/csgo/matches"
     assert captured["headers"].get("Authorization") == "Bearer fake-key-123"
 
 
-def test_with_key_no_match_returns_error(monkeypatch):
+def test_with_key_no_match_returns_no_data(monkeypatch):
+    # PandaScore has no match and TheSportsDB has nothing -> no-data dict, but
+    # PandaScore's {error} is recorded under sources and it's still top-level.
     monkeypatch.setattr(esports.config, "PANDASCORE_KEY", "fake-key-123", raising=False)
     monkeypatch.setattr(
-        esports.httpx, "get", lambda *a, **k: _FakeResponse(_SAMPLE_MATCHES)
+        esports.httpx,
+        "get",
+        _router(pandascore=_SAMPLE_MATCHES, thesportsdb={"event": []}),
     )
 
     result = esports.fetch_esports("Will Cloud9 beat Liquid in CS2?")
     assert result["game"] == "csgo"
-    assert result["error"] == "no matching pandascore match found"
+    assert result["error"] == "no esports match data found"
     assert result["source"] == "pandascore"
+    assert result["sources"]["pandascore"]["error"] == "no matching pandascore match found"
+    assert result["sources"]["thesportsdb"] is None
 
 
-def test_with_key_http_failure_returns_error(monkeypatch):
+def test_with_key_http_failure_returns_no_data(monkeypatch):
+    # PandaScore HTTP failure + TheSportsDB empty -> no-data dict; PandaScore's
+    # request-failed error is recorded under sources.
     monkeypatch.setattr(esports.config, "PANDASCORE_KEY", "fake-key-123", raising=False)
 
-    def _raise(*a, **k):
-        raise RuntimeError("network down")
+    def _fake_get(url, **kwargs):
+        if "pandascore.co" in url:
+            raise RuntimeError("network down")
+        return _FakeResponse({"event": []})
 
-    monkeypatch.setattr(esports.httpx, "get", _raise)
+    monkeypatch.setattr(esports.httpx, "get", _fake_get)
 
     result = esports.fetch_esports("NAVI vs G2 CS2")
     assert result["game"] == "csgo"
-    assert "pandascore request failed" in result["error"]
+    assert result["error"] == "no esports match data found"
+    assert "pandascore request failed" in result["sources"]["pandascore"]["error"]
+
+
+def test_with_key_prefers_pandascore_when_both_resolve(monkeypatch):
+    # PandaScore AND TheSportsDB both resolve the NAVI vs G2 match -> PandaScore
+    # is top-level, both appear under sources, and agreement is computed.
+    monkeypatch.setattr(esports.config, "PANDASCORE_KEY", "fake-key-123", raising=False)
+    # PandaScore reports the match as finished 2-1 so statuses+scores agree with
+    # the TheSportsDB fixture (Match Finished -> finished, 2 and 1).
+    ps_finished = [{
+        "id": 1, "status": "finished", "scheduled_at": "2026-06-14T18:00:00Z",
+        "opponents": [{"opponent": {"id": 10, "name": "Natus Vincere"}},
+                      {"opponent": {"id": 20, "name": "G2 Esports"}}],
+        "results": [{"team_id": 10, "score": 2}, {"team_id": 20, "score": 1}],
+    }]
+    monkeypatch.setattr(
+        esports.httpx,
+        "get",
+        _router(pandascore=ps_finished, thesportsdb=_TSDB_NAVI_G2),
+    )
+
+    result = esports.fetch_esports("Will Natus Vincere beat G2 in CS2?")
     assert result["source"] == "pandascore"
+    assert result["sources"]["pandascore"]["status"] == "finished"
+    assert result["sources"]["thesportsdb"]["status"] == "finished"
+    assert result["agreement"] == {"status": True, "score": True}
+    assert result["sources_agree"] is True
 
 
 # --- Query is split by status with opposite sorts (regression guard) ------
@@ -185,6 +314,8 @@ def test_query_splits_by_status_and_sort(monkeypatch):
     calls = []
 
     def _fake_get(url, **kwargs):
+        if "thesportsdb.com" in url:
+            return _FakeResponse({"event": []})
         params = kwargs.get("params", {})
         calls.append((params.get("filter[status]"), params.get("sort")))
         # Only the "finished" page carries the wanted match, proving recently
@@ -200,6 +331,60 @@ def test_query_splits_by_status_and_sort(monkeypatch):
     assert ("not_started,running", "begin_at") in calls   # upcoming, soonest-first
     assert ("finished", "-begin_at") in calls             # finished, newest-first
     assert len(calls) == 2
+
+
+# --- TheSportsDB unit + neither-resolves coverage -------------------------
+
+def test_thesportsdb_filters_non_esports(monkeypatch):
+    # A same-named football event must be skipped; with only that event,
+    # _query_thesportsdb_esports returns None.
+    football_only = {
+        "event": [
+            {
+                "strEvent": "Natus Vincere vs G2 Esports",
+                "strSport": "Soccer",
+                "strLeague": "Some Football League",
+                "strHomeTeam": "Natus Vincere",
+                "strAwayTeam": "G2 Esports",
+                "intHomeScore": "1", "intAwayScore": "0",
+                "strStatus": "Match Finished", "dateEvent": "2026-06-14",
+            }
+        ]
+    }
+    monkeypatch.setattr(
+        esports.httpx, "get", _router(thesportsdb=football_only)
+    )
+    assert esports._query_thesportsdb_esports("Natus Vincere", "G2 Esports") is None
+
+
+def test_thesportsdb_returns_esports_event(monkeypatch):
+    monkeypatch.setattr(
+        esports.httpx, "get", _router(thesportsdb=_TSDB_NAVI_G2)
+    )
+    sd = esports._query_thesportsdb_esports("Natus Vincere", "G2 Esports")
+    assert sd is not None
+    assert sd["source"] == "thesportsdb"
+    assert sd["status"] == "finished"
+    assert sd["league"] == "ESL Pro League"
+    assert sd["results"] == [
+        {"team_name": "Natus Vincere", "score": 2},
+        {"team_name": "G2 Esports", "score": 1},
+    ]
+
+
+def test_neither_source_resolves_returns_no_data(monkeypatch):
+    # With a key but neither source matching -> no-data dict steering to web search.
+    monkeypatch.setattr(esports.config, "PANDASCORE_KEY", "fake-key-123", raising=False)
+    monkeypatch.setattr(
+        esports.httpx, "get", _router(pandascore=[], thesportsdb={"event": None})
+    )
+
+    result = esports.fetch_esports("Will Cloud9 beat Liquid in CS2?")
+    assert result["error"] == "no esports match data found"
+    assert "web search" in result["note"]
+    assert result["sources"]["thesportsdb"] is None
+    assert result["agreement"] is None
+    assert result["sources_agree"] is None
 
 
 def test_query_prefers_upcoming_over_finished(monkeypatch):
