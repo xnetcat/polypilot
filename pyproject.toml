@@ -5,7 +5,7 @@ description = "Polypilot — MCP server for autonomous Polymarket trading"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "mcp>=1.2.0",
+    "mcp>=1.28.1",
     "httpx>=0.27.0",
     "python-dotenv>=1.0.0",
     "feedparser>=6.0.0",
